@@ -1,0 +1,7 @@
+#!/bin/bash
+
+~/go/bin/mpbt-builder \
+    -root . \
+    -solution .mpbt/cf/xlibre/solutions/github.yaml \
+    -workdir _WORK_ \
+    build
