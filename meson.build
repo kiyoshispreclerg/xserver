@@ -839,7 +839,7 @@ if (get_option('tests') and host_machine.system() != 'windows' and build_xserver
     subdir('test')
 endif
 
-if build_xorg
+if build_xorg_sdk
     sdkconfig = configuration_data()
     awk = find_program('awk')
 
