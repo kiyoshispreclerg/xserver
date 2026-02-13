@@ -33,9 +33,9 @@ package-config:
             -Dxf86-input-inputtest=false
 
     3rdparty/libdrm:
-        meson-extra-args: |
-            -Domap=enabled
-            -Dfreedreno=enabled
+        meson-extra-args:
+            - -Domap=enabled
+            - -Dfreedreno=enabled
 
     3rdparty/xcb-proto:
         ref: xcb-proto-1.17.0
