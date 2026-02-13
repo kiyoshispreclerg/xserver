@@ -22,15 +22,15 @@ package-mapping:
 package-config:
     # minimal sdk-only build, just enough to compile drivers
     xserver/xlibre-xserver-local:
-        meson-extra-args: |
-            -Dxephyr=false
-            -Dxnest=false
-            -Dxvfb=false
-            -Dxfbdev=false
-            -Dxorg=false
-            -Dxorg-sdk=true
-            -Dsuid_wrapper=false
-            -Dxf86-input-inputtest=false
+        meson-extra-args:
+            - -Dxephyr=false
+            - -Dxnest=false
+            - -Dxvfb=false
+            - -Dxfbdev=false
+            - -Dxorg=false
+            - -Dxorg-sdk=true
+            - -Dsuid_wrapper=false
+            - -Dxf86-input-inputtest=false
 
     3rdparty/libdrm:
         meson-extra-args:
