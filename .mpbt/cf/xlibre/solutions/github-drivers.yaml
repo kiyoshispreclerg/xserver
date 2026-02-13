@@ -28,7 +28,8 @@ package-config:
             - -Dxephyr=false
             - -Dxnest=false
             - -Dxvfb=false
-            - -Dxorg=true
+            - -Dxorg=false
+            - -Dxorg-sdk=true
             - -Dglamor=true
             - -Dxselinux=false
             - -Dxf86bigfont=false
