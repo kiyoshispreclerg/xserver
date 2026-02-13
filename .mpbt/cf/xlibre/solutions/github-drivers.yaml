@@ -152,6 +152,7 @@ package-config:
 env:
     PKG_CONFIG_PATH: ${install-prefix}/share/pkgconfig:${install-prefix}/lib/pkgconfig:${install-prefix}/lib/${@PROJECT::@machine}/pkgconfig/
     ACLOCAL_PATH: ${install-prefix}/share/aclocal
+    ACLOCAL_FLAGS: -I ${install-prefix}/share/aclocal
 
 packages:
     - ${@PROJECT::@rootdir}/.mpbt/cf/xlibre/packages
