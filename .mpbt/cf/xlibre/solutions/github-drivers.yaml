@@ -20,41 +20,23 @@ package-mapping:
 
 # per package configuration
 package-config:
-    # minimal xserver build, just enough to compile drivers
-    # 2do: we should have a SDK-only build that's just installing headers
-    xserver/xlibre-xserver:
-        meson-extra-args:
-            - -Dc_args="-fno-common"
-            - -Dxephyr=false
-            - -Dxnest=false
-            - -Dxvfb=false
-            - -Dxorg=false
-            - -Dxorg-sdk=true
-            - -Dglamor=true
-            - -Dxselinux=false
-            - -Dxf86bigfont=false
-            - -Dxcsecurity=false
-            - -Dxfbdev=false
-            - -Dxdmcp=false
-            - -Dxdm-auth-1=false
-            - -Dipv6=false
-            - -Dsuid_wrapper=false
-            - -Dsystemd_notify=false
-            - -Dsystemd_logind=false
-            - -Dseatd_libseat=false
-            - -Dscreensaver=false
-            - -Dxres=false
-            - -Dnamespace=false
-            - -Dxcsecurity=false
-            - -Dmitshm=false
-            - -Dxf86-input-inputtest=false
-            - -Ddri2=true
-            - -Ddri3=true
+    # minimal sdk-only build, just enough to compile drivers
+    xserver/xlibre-xserver-local:
+        meson-extra-args: |
+            -Dxephyr=false
+            -Dxnest=false
+            -Dxvfb=false
+            -Dxfbdev=false
+            -Dxorg=false
+            -Dxorg-sdk=true
+            -Dsuid_wrapper=false
+            -Dxf86-input-inputtest=false
 
     3rdparty/libdrm:
-        meson-extra-args:
-            - -Domap=enabled
-            - -Dfreedreno=enabled
+        meson-extra-args: |
+            -Domap=enabled
+            -Dfreedreno=enabled
+
     3rdparty/xcb-proto:
         ref: xcb-proto-1.17.0
 
