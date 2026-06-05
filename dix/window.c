@@ -3422,7 +3422,7 @@ ChangeWindowDeviceCursor(WindowPtr pWin, DeviceIntPtr pDev, CursorPtr pCursor)
     CursorPtr pOldCursor = NULL;
     ScreenPtr pScreen;
 
-    if (!MakeWindowOptional(pWin))
+    if (!pWin->optional && !MakeWindowOptional(pWin))
         return BadAlloc;
 
     /* 1) Check if window has device cursor set
