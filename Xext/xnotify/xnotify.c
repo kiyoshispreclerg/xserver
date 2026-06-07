@@ -1040,19 +1040,184 @@ XnotifySendStatus(void) {
     send(notify_sock, msg, strlen(msg), 0);
 }
 
-void
-XnotifyReport(ClientPtr client, const int action)
+static struct {
+    char exe[EXE_PATH_MAX];
+    int      action;
+    Time     last_time;
+} last_notify = {0};
+
+#define REPORT_THROTTLE_SIZE 64
+static struct {
+    char exe[EXE_PATH_MAX];
+    int  action;
+    Time last_time;
+} report_throttle[REPORT_THROTTLE_SIZE];
+static int report_throttle_count = 0;
+
+static Bool
+XnotifyReportThrottled(const char *exe, int action)
 {
-    (void)client;
-    (void)action;
+    Time now = GetTimeInMillis();
+
+    for (int i = 0; i < report_throttle_count; i++) {
+        if (report_throttle[i].action != action)
+            continue;
+        if (strcmp(report_throttle[i].exe, exe) != 0)
+            continue;
+        if (now - report_throttle[i].last_time < XNOTIFY_REPORT_THROTTLE_MS)
+            return TRUE;
+        report_throttle[i].last_time = now;
+        return FALSE;
+    }
+
+    int slot;
+    if (report_throttle_count < REPORT_THROTTLE_SIZE) {
+        slot = report_throttle_count++;
+    } else {
+        slot = 0;
+        for (int i = 1; i < REPORT_THROTTLE_SIZE; i++) {
+            if (report_throttle[i].last_time < report_throttle[slot].last_time)
+                slot = i;
+        }
+    }
+    strncpy(report_throttle[slot].exe, exe, EXE_PATH_MAX - 1);
+    report_throttle[slot].exe[EXE_PATH_MAX - 1] = '\0';
+    report_throttle[slot].action = action;
+    report_throttle[slot].last_time = now;
+    return FALSE;
+}
+
+static Bool
+should_notify(const char *exe, const int action) {
+    if (strcmp(exe, last_notify.exe) != 0 || action != last_notify.action)
+        return TRUE;
+
+    Time now = GetTimeInMillis();
+    if (now - last_notify.last_time < XNOTIFY_THROTTLE_MS)
+        return FALSE;
+
+    return TRUE;
+}
+
+static void
+update_last_notify(const char *exe, const int action) {
+    strncpy(last_notify.exe, exe, EXE_PATH_MAX - 1);
+    last_notify.exe[EXE_PATH_MAX - 1] = '\0';
+    last_notify.action = action;
+    last_notify.last_time = GetTimeInMillis();
+}
+
+static void
+XnotifyGrantPermission(ClientPtr client, int action) {
+    if (!client || action <= 0)
+        return;
+
+    uint32_t bit = (1U << (action - 1));
+    *XnotifyPermMask(client) |= bit;
+}
+
+void
+XnotifyReport(ClientPtr client, const int action) {
+    if (!xnotify_enabled)
+        return;
+
+    if (!XnotifyIsGuardAlive())
+        return;
+
+    if (notify_sock == -1) {
+        XnotifyInit();
+        if (notify_sock == -1)
+            return;
+    }
+
+    pid_t pid = GetClientPid(client);
+
+    static pid_t last_report_pid = 0;
+    static int   last_report_action = 0;
+    static Time  last_report_time = 0;
+    Time now = GetTimeInMillis();
+    if (pid == last_report_pid && action == last_report_action &&
+        now - last_report_time < XNOTIFY_REPORT_THROTTLE_MS)
+        return;
+    last_report_pid = pid;
+    last_report_action = action;
+    last_report_time = now;
+
+    const char *exe = XnotifyGetExe(pid);
+    if (!exe)
+        exe = "?";
+
+    if (XnotifyReportThrottled(exe, action))
+        return;
+
+    char msg[1024];
+    snprintf(msg, sizeof(msg),
+             "{\"command\":\"REPORT\",\"action\":%d,\"exe\":\"%s\",\"pid\":%d}\n",
+             action, exe, pid);
+
+    ssize_t sent = send(notify_sock, msg, strlen(msg), 0);
+
+    if (sent == -1 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        close(notify_sock);
+        notify_sock = -1;
+    }
 }
 
 Bool
-XnotifyIsAllowed(ClientPtr client, const int action)
-{
-    (void)client;
-    (void)action;
-    return TRUE;
+XnotifyIsAllowed(ClientPtr client, const int action) {
+    if (!xnotify_enabled)
+        return TRUE;
+
+    if (!XnotifyIsGuardAlive() && !security_mode)
+        return TRUE;
+
+    uint32_t bit = (1U << (action - 1));
+
+    if (*XnotifyPermMask(client) & bit) {
+        XnotifyReport(client, action);
+        return TRUE;
+    }
+
+    if (xnotify_global_allow_mask & bit) {
+        XnotifyGrantPermission(client, action);
+        XnotifyReport(client, action);
+        return TRUE;
+    }
+
+    ClientExeInfo info = GetClientExeInfo(client);
+    if (!info.exe)
+        return FALSE;
+
+    XPermEntry *entry = find_matching_entry(&info);
+    Bool allowed = FALSE;
+    if (entry && (entry->perm_mask & bit)) {
+        XnotifyGrantPermission(client, action);
+        XnotifyRemovePending(info.exe, action);
+        allowed = TRUE;
+    }
+
+    if (XnotifyHasRecentPending(info.exe, action)) {
+        free(info.exe);
+        free(info.args);
+        return allowed;
+    }
+
+    if (allowed) {
+        XnotifyReport(client, action);
+        free(info.exe);
+        free(info.args);
+        return TRUE;
+    }
+
+    if (should_notify(info.exe, action)) {
+        Xnotify(client, action);
+        update_last_notify(info.exe, action);
+        XnotifyAddPending(info.exe, action);
+    }
+
+    free(info.exe);
+    free(info.args);
+    return FALSE;
 }
 
 void
