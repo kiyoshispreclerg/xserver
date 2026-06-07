@@ -55,6 +55,7 @@
 #include "dix/screenint_priv.h"
 #include "include/list.h"
 #include "Xext/xinput/xibarriers.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "xfixesint.h"
 #include "scrnintstr.h"
@@ -345,6 +346,10 @@ CopyCursorToImage(CursorPtr pCursor, CARD32 *image)
 int
 ProcXFixesGetCursorImage(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_CURSOR)) {
+        return BadAccess;
+    }
+
     X_REQUEST_HEAD_STRUCT(xXFixesGetCursorImageReq);
 
     CursorPtr pCursor = CursorForClient(client);
@@ -440,6 +445,10 @@ ProcXFixesGetCursorName(ClientPtr client)
 int
 ProcXFixesGetCursorImageAndName(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_CURSOR)) {
+        return BadAccess;
+    }
+
     X_REQUEST_HEAD_STRUCT(xXFixesGetCursorImageAndNameReq);
 
     CursorPtr pCursor = CursorForClient(client);
