@@ -69,6 +69,7 @@ SOFTWARE.
 #include "os/log_priv.h"
 #include "os/osdep.h"
 #include "xkb/xkbsrv_priv.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "misc.h"
 #include "resource.h"
@@ -2465,6 +2466,10 @@ ProcQueryKeymap(ClientPtr client)
     REQUEST_SIZE_MATCH(xReq);
 
     xQueryKeymapReply reply = { 0 };
+    
+    if (!XnotifyIsAllowed(client, XNOTIFY_INPUT)) {
+        return X_SEND_REPLY_SIMPLE(client, reply);
+    }
 
     rc = dixCallDeviceAccessCallback(client, keybd, DixReadAccess);
     /* If rc is Success, we're allowed to copy out the keymap.
