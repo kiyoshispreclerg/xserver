@@ -28,6 +28,8 @@
 #include "xfixesint.h"
 #include "xace.h"
 
+#include "Xext/xnotify/xnotify.h"
+
 static RESTYPE SelectionClientType, SelectionWindowType;
 static Bool SelectionCallbackRegistered = FALSE;
 
@@ -132,6 +134,10 @@ CheckSelectionCallback(void)
 int
 ProcXFixesSelectSelectionInput(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_SELECTION)) {
+        return Success;
+    }
+    
     REQUEST(xXFixesSelectSelectionInputReq);
     REQUEST_SIZE_MATCH(xXFixesSelectSelectionInputReq);
 
