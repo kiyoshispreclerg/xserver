@@ -121,6 +121,7 @@ Equipment Corporation.
 #include "os/screensaver.h"
 #include "Xext/panoramiX.h"
 #include "Xext/panoramiXsrv.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "misc.h"
 #include "scrnintstr.h"
@@ -1579,6 +1580,12 @@ ProcGetWindowAttributes(ClientPtr client)
     int rc = dixLookupWindow(&pWin, stuff->id, client, DixGetAttrAccess);
     if (rc != Success)
         return rc;
+
+    if (pWin->owner != client && !XnotifyIsAllowed(client, XNOTIFY_MANAGE)) {
+        client->errorValue = stuff->id;
+        xGetWindowAttributesReply reply = {0};
+        return X_SEND_REPLY_SIMPLE(client, reply);
+    }
 
     xGetWindowAttributesReply reply = {
         .bitGravity = pWin->bitGravity,
