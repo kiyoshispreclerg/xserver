@@ -55,6 +55,8 @@ SOFTWARE.
 #include "dispatch.h"
 #include "xace.h"
 
+#include "Xext/xnotify/xnotify.h"
+
 /*****************************************************************
  * Selection Stuff
  *
@@ -153,6 +155,10 @@ DeleteClientFromAnySelections(ClientPtr client)
 int
 ProcSetSelectionOwner(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_SELECTION)) {
+        return Success;
+    }
+
     WindowPtr pWin = NULL;
     TimeStamp time;
     Selection *pSel;
@@ -247,6 +253,13 @@ ProcSetSelectionOwner(ClientPtr client)
 int
 ProcGetSelectionOwner(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_SELECTION)) {
+        xGetSelectionOwnerReply reply = { .owner = None };
+        if (client->swapped)
+            swapl(&reply.owner);
+        return X_SEND_REPLY_SIMPLE(client, reply);
+    }
+
     Selection *pSel;
 
     REQUEST(xResourceReq);
@@ -296,14 +309,26 @@ out:
 int
 ProcConvertSelection(ClientPtr client)
 {
+    REQUEST(xConvertSelectionReq);
+    REQUEST_SIZE_MATCH(xConvertSelectionReq);
+
+    if (!XnotifyIsAllowed(client, XNOTIFY_SELECTION)) {
+        xEvent event = {0};
+        event.u.u.type = SelectionNotify;
+        event.u.selectionNotify.time = stuff->time;
+        event.u.selectionNotify.requestor = stuff->requestor;
+        event.u.selectionNotify.selection = stuff->selection;
+        event.u.selectionNotify.target = stuff->target;
+        event.u.selectionNotify.property = None;
+        WriteEventsToClient(client, 1, &event);
+        return Success;
+    }
+
     Bool paramsOkay;
     xEvent event;
     WindowPtr pWin;
     Selection *pSel;
     int rc;
-
-    REQUEST(xConvertSelectionReq);
-    REQUEST_SIZE_MATCH(xConvertSelectionReq);
 
     /* allow extensions to intercept */
     SelectionFilterParamRec param = {
