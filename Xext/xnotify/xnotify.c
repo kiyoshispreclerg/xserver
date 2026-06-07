@@ -574,18 +574,135 @@ XnotifyClear(const int action) {
     }
 }
 
+typedef struct {
+    pid_t pid;
+    char  exe[EXE_PATH_MAX];
+    Time  last_used;
+} XnotifyCacheEntry;
+
+static XnotifyCacheEntry xnotify_cache[XNOTIFY_CACHE_MAX] = {0};
+static int               xnotify_cache_count = 0;
+static Time              xnotify_last_cleanup = 0;
+
+static void
+XnotifyCacheCleanup(void) {
+    Time now = GetTimeInMillis();
+    if (now - xnotify_last_cleanup < 30000)
+        return;
+
+    xnotify_last_cleanup = now;
+
+    int write_idx = 0;
+    for (int i = 0; i < xnotify_cache_count; i++) {
+        if (kill(xnotify_cache[i].pid, 0) == 0 || errno == EPERM) {
+            if (write_idx != i)
+                xnotify_cache[write_idx] = xnotify_cache[i];
+            write_idx++;
+        }
+    }
+    xnotify_cache_count = write_idx;
+
+    write_idx = 0;
+    for (int i = 0; i < xpending_count; i++) {
+        if (now - xpending_cache[i].last_time < XNOTIFY_PENDING_THROTTLE_MS) {
+            if (write_idx != i)
+                xpending_cache[write_idx] = xpending_cache[i];
+            write_idx++;
+        }
+    }
+    xpending_count = write_idx;
+}
+
+static char *
+XnotifyGetExe(pid_t pid) {
+    if (pid <= 0)
+        return NULL;
+
+    Time now = GetTimeInMillis();
+
+    for (int i = 0; i < xnotify_cache_count; i++) {
+        if (xnotify_cache[i].pid == pid) {
+            xnotify_cache[i].last_used = now;
+            return xnotify_cache[i].exe;
+        }
+    }
+
+    char proc[64];
+    snprintf(proc, sizeof(proc), "/proc/%d/exe", pid);
+
+    char path[EXE_PATH_MAX];
+    ssize_t len = readlink(proc, path, sizeof(path)-1);
+    if (len > 0) {
+        path[len] = '\0';
+
+        char *deleted = strstr(path, " (deleted)");
+        if (deleted)
+            *deleted = '\0';
+    }
+
+    if (len <= 0 || path[0] == '\0') {
+        char proc_cmdline[64];
+        snprintf(proc_cmdline, sizeof(proc_cmdline), "/proc/%d/cmdline", pid);
+
+        int fd = open(proc_cmdline, O_RDONLY);
+        if (fd >= 0) {
+            ssize_t n = read(fd, path, sizeof(path)-1);
+            close(fd);
+            if (n > 0)
+                path[n] = '\0';
+        }
+    }
+
+    if (path[0] == '\0')
+        return NULL;
+
+    if (xnotify_cache_count < XNOTIFY_CACHE_MAX) {
+        xnotify_cache[xnotify_cache_count].pid = pid;
+        strlcpy(xnotify_cache[xnotify_cache_count].exe, path, EXE_PATH_MAX);
+        xnotify_cache[xnotify_cache_count].last_used = now;
+        xnotify_cache_count++;
+        return xnotify_cache[xnotify_cache_count-1].exe;
+    } else {
+        int oldest = 0;
+        for (int i = 1; i < XNOTIFY_CACHE_MAX; i++) {
+            if (xnotify_cache[i].last_used < xnotify_cache[oldest].last_used)
+                oldest = i;
+        }
+        xnotify_cache[oldest].pid = pid;
+        strlcpy(xnotify_cache[oldest].exe, path, EXE_PATH_MAX);
+        xnotify_cache[oldest].last_used = now;
+        return xnotify_cache[oldest].exe;
+    }
+}
+
 ClientExeInfo
-GetClientExeInfo(ClientPtr client)
-{
-    (void)client;
-    return (ClientExeInfo){ .exe = NULL, .args = NULL };
+GetClientExeInfo(ClientPtr client) {
+    ClientExeInfo info = { .exe = NULL, .args = NULL };
+
+    pid_t pid = GetClientPid(client);
+    if (pid <= 0)
+        return info;
+
+    char *exe = XnotifyGetExe(pid);
+    if (!exe)
+        return info;
+
+    info.exe = strdup(exe);
+
+    const char *args = GetClientCmdArgs(client);
+    if (args && *args)
+        info.args = strdup(args);
+
+    return info;
 }
 
 char *
 GetClientExePath(ClientPtr client)
 {
-    (void)client;
-    return NULL;
+    pid_t pid = GetClientPid(client);
+    if (pid <= 0)
+        return NULL;
+    return XnotifyGetExe(pid);
 }
 
 void
