@@ -147,6 +147,7 @@ Equipment Corporation.
 #include "Xext/panoramiX/panoramiXsrv.h"
 #include "Xext/xinput/exglobals.h"
 #include "Xext/xkeyboard/xkbsrv_priv.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "resource.h"
 #include "windowstr.h"
@@ -2032,6 +2033,10 @@ TryClientEvents(ClientPtr client, DeviceIntPtr dev, xEvent *pEvents,
                 size_t count, Mask mask, Mask filter, GrabPtr grab)
 {
     int type;
+    /* Lazily-resolved XnotifyIsAllowed(client, XNOTIFY_INPUT) for this call:
+     * -1 = not resolved yet, 0/1 = cached result. A single key event can hit
+     * several input checks below (auto-repeat + core + raw); resolve once. */
+    int input_allowed = -1;
 
 #ifdef DEBUG_EVENTS
     ErrorF("[dix] Event([%d, %d], mask=0x%lx), client=%d%s",
@@ -2089,7 +2094,10 @@ TryClientEvents(ClientPtr client, DeviceIntPtr dev, xEvent *pEvents,
                 xEvent release = *pEvents;
 
                 release.u.u.type = KeyRelease;
-                WriteEventsToClient(client, 1, &release);
+                if (input_allowed < 0)
+                    input_allowed = XnotifyIsAllowed(client, XNOTIFY_INPUT);
+                if (input_allowed)
+                    WriteEventsToClient(client, 1, &release);
 #ifdef DEBUG_EVENTS
                 ErrorF(" (plus fake core release for repeat)");
 #endif
@@ -2111,7 +2119,10 @@ TryClientEvents(ClientPtr client, DeviceIntPtr dev, xEvent *pEvents,
 #ifdef DEBUG_EVENTS
                 ErrorF(" (plus fake xi1 release for repeat)");
 #endif
-                WriteEventsToClient(client, 1, (xEvent *) &release);
+                if (input_allowed < 0)
+                    input_allowed = XnotifyIsAllowed(client, XNOTIFY_INPUT);
+                if (input_allowed)
+                    WriteEventsToClient(client, 1, (xEvent *) &release);
             }
             else {
 #ifdef DEBUG_EVENTS
@@ -2125,6 +2136,25 @@ TryClientEvents(ClientPtr client, DeviceIntPtr dev, xEvent *pEvents,
         if (client->smart_priority < SMART_MAX_PRIORITY)
             client->smart_priority++;
         SetCriticalOutputPending();
+    }
+
+    if (type == KeyPress || type == KeyRelease ||
+        type == DeviceKeyPress || type == DeviceKeyRelease) {
+        if (input_allowed < 0)
+            input_allowed = XnotifyIsAllowed(client, XNOTIFY_INPUT);
+        if (!input_allowed)
+            return 1;
+    }
+
+    type = xi2_get_type(pEvents);
+    if (type == XI_RawKeyPress || type == XI_RawKeyRelease ||
+        type == XI_RawButtonPress || type == XI_RawButtonRelease ||
+        type == XI_RawMotion ||
+        type == XI_RawTouchBegin || type == XI_RawTouchUpdate || type == XI_RawTouchEnd) {
+        if (input_allowed < 0)
+            input_allowed = XnotifyIsAllowed(client, XNOTIFY_INPUT);
+        if (!input_allowed)
+            return 1;
     }
 
     WriteEventsToClient(client, count, pEvents);
@@ -2814,6 +2844,17 @@ static int
 DeliverOneEvent(InternalEvent *event, DeviceIntPtr dev, enum InputLevel level,
                 WindowPtr win, Window child, GrabPtr grab)
 {
+    WindowPtr focus = inputInfo.keyboard->focus->win;
+    if (focus != win && win->owner && !XnotifyIsAllowed(win->owner, XNOTIFY_INPUT)) {
+        switch (event->any.type) {
+        case ET_KeyPress:
+        case ET_KeyRelease:
+            return 0;
+        default:
+            break;
+        }
+    }
+    
     xEvent *xE = NULL;
     int count = 0;
     int deliveries = 0;
@@ -4993,6 +5034,11 @@ ProcGetInputFocus(ClientPtr client)
 int
 ProcGrabPointer(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_INPUT_GRAB)) {
+        xGrabPointerReply reply = {0};
+        return X_SEND_REPLY_SIMPLE(client, reply);
+    }
+
     REQUEST(xGrabPointerReq);
     REQUEST_SIZE_MATCH(xGrabPointerReq);
 
@@ -5261,6 +5307,11 @@ GrabDevice(ClientPtr client, DeviceIntPtr dev,
 int
 ProcGrabKeyboard(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_INPUT_GRAB)) {
+        xGrabKeyboardReply reply = {0};
+        return X_SEND_REPLY_SIMPLE(client, reply);
+    }
+
     BYTE status;
 
     REQUEST(xGrabKeyboardReq);
@@ -5342,6 +5393,11 @@ ProcQueryPointer(ClientPtr client)
     rc = dixLookupWindow(&pWin, stuff->id, client, DixGetAttrAccess);
     if (rc != Success)
         return rc;
+    if (pWin->owner != client && !XnotifyIsAllowed(client, XNOTIFY_CURSOR)) {
+        client->errorValue = stuff->id;
+        return BadAccess;
+    }
+
     rc = dixCallDeviceAccessCallback(client, mouse, DixReadAccess);
     if (rc != Success && rc != BadAccess)
         return rc;
@@ -5630,6 +5686,10 @@ ProcUngrabKey(ClientPtr client)
 int
 ProcGrabKey(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_HOTKEY)) {
+        return BadValue;
+    }
+
     WindowPtr pWin;
 
     REQUEST(xGrabKeyReq);
