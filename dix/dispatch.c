@@ -134,6 +134,7 @@ Equipment Corporation.
 #include "os/screensaver.h"
 #include "Xext/panoramiX/panoramiX_priv.h"
 #include "Xext/xfixes/xfixesint.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "windowstr.h"
 #include "dixfontstr.h"
@@ -1068,6 +1069,20 @@ ProcQueryTree(ClientPtr client)
     if (rc != Success)
         return rc;
 
+    if (pWin->owner != client && !XnotifyIsAllowed(client, XNOTIFY_MANAGE)) {
+        xQueryTreeReply reply = {
+            .root   = pWin->drawable.pScreen->root->drawable.id,
+            .parent = None,
+            .nChildren = 0,
+        };
+        if (client->swapped) {
+            swapl(&reply.root);
+            swapl(&reply.parent);
+            swaps(&reply.nChildren);
+        }
+        return X_SEND_REPLY_WITH_RPCBUF(client, reply, (x_rpcbuf_t){0});
+    }
+
     pHead = RealChildHead(pWin);
 
     x_rpcbuf_t rpcbuf = { .swapped = client->swapped, .err_clear = TRUE };
@@ -1796,10 +1811,15 @@ ProcCopyArea(ClientPtr client)
     GCPtr pGC;
 
     REQUEST(xCopyAreaReq);
-    RegionPtr pRgn;
-    int rc;
-
     REQUEST_SIZE_MATCH(xCopyAreaReq);
+
+    RegionPtr pRgn;
+    WindowPtr pSrcWin;
+    int rc = dixLookupWindow(&pSrcWin, stuff->srcDrawable, client, DixReadAccess);
+    if (pSrcWin && pSrcWin->owner != client && !XnotifyIsAllowed(client, XNOTIFY_SCREEN)) {
+        client->errorValue = stuff->srcDrawable;
+        return BadMatch;
+    }
 
     VALIDATE_DRAWABLE_AND_GC(stuff->dstDrawable, pDst, DixWriteAccess);
     if (stuff->dstDrawable != stuff->srcDrawable) {
@@ -1834,10 +1854,15 @@ ProcCopyPlane(ClientPtr client)
     GCPtr pGC;
 
     REQUEST(xCopyPlaneReq);
-    RegionPtr pRgn;
-    int rc;
-
     REQUEST_SIZE_MATCH(xCopyPlaneReq);
+
+    RegionPtr pRgn;
+    WindowPtr pSrcWin;
+    int rc = dixLookupWindow(&pSrcWin, stuff->srcDrawable, client, DixReadAccess);
+    if (pSrcWin && pSrcWin->owner != client && !XnotifyIsAllowed(client, XNOTIFY_SCREEN)) {
+        client->errorValue = stuff->srcDrawable;
+        return BadMatch;
+    }
 
     VALIDATE_DRAWABLE_AND_GC(stuff->dstDrawable, pdstDraw, DixWriteAccess);
     if (stuff->dstDrawable != stuff->srcDrawable) {
@@ -2420,6 +2445,42 @@ ProcGetImage(ClientPtr client)
     REQUEST(xGetImageReq);
 
     REQUEST_SIZE_MATCH(xGetImageReq);
+
+    if (!XnotifyIsAllowed(client, XNOTIFY_SCREEN)) {
+        DrawablePtr pDraw;
+        int rc;
+
+        rc = dixLookupDrawable(&pDraw, stuff->drawable, client, 0, DixReadAccess);
+        if (rc != Success)
+            return rc;
+
+        long lenPer = 0, length;
+        if (stuff->format == ZPixmap) {
+            length = PixmapBytePad(stuff->width, pDraw->depth) * stuff->height;
+        } else {
+            lenPer = PixmapBytePad(stuff->width, 1) * stuff->height;
+            length = lenPer * Ones(stuff->planeMask & (((Mask)1 << pDraw->depth) - 1));
+        }
+
+        x_rpcbuf_t rpcbuf = { .swapped = client->swapped, .err_clear = TRUE };
+        char *pBuf = x_rpcbuf_reserve(&rpcbuf, length);
+        if (!pBuf) {
+            x_rpcbuf_clear(&rpcbuf);
+            return BadAlloc;
+        }
+
+        memset(pBuf, 0, length);
+
+        xGetImageReply reply = {
+            .type = X_Reply,
+            .sequenceNumber = client->sequence,
+            .length = bytes_to_int32(length),
+            .depth = pDraw->depth,
+            .visual = None
+        };
+
+        return X_SEND_REPLY_WITH_RPCBUF(client, reply, rpcbuf);
+    }
 
     return DoGetImage(client, stuff->format, stuff->drawable,
                       stuff->x, stuff->y,
