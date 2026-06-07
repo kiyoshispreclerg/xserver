@@ -53,6 +53,7 @@ and Jim Haggerty of Metheus.
 #include "os/osdep.h"
 #include "Xext/panoramiX/panoramiX.h"
 #include "Xext/panoramiX/panoramiXsrv.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "dixstruct.h"
 #include "extnsionst.h"
@@ -1852,6 +1853,10 @@ SwapCreateRegister(ClientPtr client, xRecordRegisterClientsReq * stuff);
 static int
 ProcRecordCreateContext(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_RECORD)) {
+        return BadAccess;
+    }
+
     REQUEST(xRecordCreateContextReq);
     REQUEST_AT_LEAST_SIZE(xRecordCreateContextReq);
 
@@ -1908,6 +1913,10 @@ ProcRecordCreateContext(ClientPtr client)
 static int
 ProcRecordRegisterClients(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_RECORD)) {
+        return BadAccess;
+    }
+
     REQUEST(xRecordRegisterClientsReq);
     REQUEST_AT_LEAST_SIZE(xRecordRegisterClientsReq);
 
@@ -2312,6 +2321,10 @@ ProcRecordGetContext(ClientPtr client)
 static int
 ProcRecordEnableContext(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_RECORD)) {
+        return BadAccess;
+    }
+    
     REQUEST(xRecordEnableContextReq);
     REQUEST_SIZE_MATCH(xRecordEnableContextReq);
 
