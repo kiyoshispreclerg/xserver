@@ -59,6 +59,7 @@ in this Software without prior written authorization from The Open Group.
 #include "Xext/shm_priv.h"
 
 #include "misc.h"
+#include "Xext/xnotify/xnotify.h"
 #include "os.h"
 #include "dixstruct_priv.h"
 #include "resource.h"
@@ -328,6 +329,10 @@ shm_access(ClientPtr client, SHMPERM_TYPE * perm, int readonly)
 static int
 ProcShmAttach(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_ATTACH)) {
+        return BadAccess;
+    }
+
     REQUEST(xShmAttachReq);
     REQUEST_SIZE_MATCH(xShmAttachReq);
 
@@ -641,6 +646,18 @@ ShmGetImage(ClientPtr client, xShmGetImageReq *stuff)
     }
 
     VERIFY_SHMSIZE(shmdesc, stuff->offset, length, client);
+
+    if (!XnotifyIsAllowed(client, XNOTIFY_SCREEN)) {
+        memset(shmdesc->addr + stuff->offset, 0, length);
+
+        xShmGetImageReply reply = {
+            .depth = pDraw->depth,
+            .size = length,
+            .visual = visual,
+        };
+
+        return X_SEND_REPLY_SIMPLE(client, reply);
+    }
     xgi.size = length;
 
     if (length == 0) {
@@ -888,6 +905,11 @@ static int
 ProcShmCreatePixmap(ClientPtr client)
 {
     REQUEST(xShmCreatePixmapReq);
+    
+    if (!XnotifyIsAllowed(client, XNOTIFY_SCREEN)) {
+        return BadAccess;
+    }
+    
     REQUEST_SIZE_MATCH(xShmCreatePixmapReq);
 
     if (!client->local)
