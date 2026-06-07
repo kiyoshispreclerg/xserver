@@ -48,6 +48,7 @@
 #include "dix/screenint_priv.h"
 #include "miext/extinit_priv.h"
 #include "Xext/panoramiX/panoramiXsrv.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "compint.h"
 #include "xace.h"
@@ -148,6 +149,10 @@ SingleCompositeRedirectWindow(ClientPtr client, xCompositeRedirectWindowReq *stu
     VERIFY_WINDOW(pWin, stuff->window, client,
                   DixSetAttrAccess | DixManageAccess | DixBlendAccess);
 
+    if (pWin->owner != client && !XnotifyIsAllowed(client, XNOTIFY_COMPOSITE)) {
+        return BadAccess;
+    }
+
     return compRedirectWindow(client, pWin, stuff->update);
 }
 
@@ -158,6 +163,10 @@ SingleRedirectSubwindows(ClientPtr client, xCompositeRedirectSubwindowsReq *stuf
 
     VERIFY_WINDOW(pWin, stuff->window, client,
                   DixSetAttrAccess | DixManageAccess | DixBlendAccess);
+
+    if (pWin->owner != client && !XnotifyIsAllowed(client, XNOTIFY_COMPOSITE)) {
+        return BadAccess;
+    }
 
     return compRedirectSubwindows(client, pWin, stuff->update);
 }
@@ -218,6 +227,10 @@ SingleCompositeNameWindowPixmap(ClientPtr client, xCompositeNameWindowPixmapReq 
 
     VERIFY_WINDOW(pWin, stuff->window, client, DixGetAttrAccess);
 
+    if (pWin->owner != client && !XnotifyIsAllowed(client, XNOTIFY_COMPOSITE)) {
+        return BadAccess;
+    }
+
     ScreenPtr pScreen = pWin->drawable.pScreen;
 
     if (!pWin->viewable)
@@ -267,6 +280,10 @@ SingleCompositeGetOverlayWindow(ClientPtr client, xCompositeGetOverlayWindowReq 
 
     VERIFY_WINDOW(pWin, stuff->window, client, DixGetAttrAccess);
     ScreenPtr pScreen = pWin->drawable.pScreen;
+
+    if (pWin->owner != client && !XnotifyIsAllowed(client, XNOTIFY_COMPOSITE)) {
+        return BadAccess;
+    }
 
     /*
      * Create an OverlayClient structure to mark this client's
