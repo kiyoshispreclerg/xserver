@@ -105,6 +105,7 @@ SOFTWARE.
 #include "os/mathx_priv.h"
 #include "os/osdep.h"
 #include "Xext/xkeyboard/xkbsrv_priv.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "inputstr.h"
 #include "windowstr.h"
@@ -2544,6 +2545,10 @@ GrabKey(ClientPtr client, DeviceIntPtr dev, DeviceIntPtr modifier_device,
         int key, GrabParameters *param, enum InputLevel grabtype,
         GrabMask *mask)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_HOTKEY)) {
+        return BadValue;
+    }
+
     WindowPtr pWin;
     GrabPtr grab;
     KeyClassPtr k = dev->key;
