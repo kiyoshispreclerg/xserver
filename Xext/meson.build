@@ -14,6 +14,7 @@ libxserver_xext = static_library('xserver_xext',
     dependencies: common_dep,
 )
 
+subdir('xnotify')
 subdir('bigreq')
 subdir('geext')
 subdir('xfixes')
