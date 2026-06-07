@@ -929,6 +929,7 @@ dixCreateWindow(Window wid, WindowPtr pParent, int x, int y, unsigned w,
         event.u.u.type = CreateNotify;
         DeliverEvents(pParent, &event, 1, NullWindow);
     }
+    pWin->owner = client;
     return pWin;
 }
 

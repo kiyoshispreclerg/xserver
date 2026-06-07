@@ -152,6 +152,7 @@ typedef struct _Window {
     unsigned unhittable:1;      /* doesn't hit-test, for rootless */
     unsigned damagedDescendants:1;      /* some descendants are damaged */
     unsigned inhibitBGPaint:1;  /* paint the background? */
+    ClientPtr owner;
 
     PropertyPtr properties;     /* default: NULL */
 } WindowRec;
