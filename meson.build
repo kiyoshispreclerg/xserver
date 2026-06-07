@@ -818,6 +818,7 @@ if build_xserver
         libxserver_dri2,
         libxserver_dri3,
         libxserver_xinerama,
+        libxserver_xnotify,
         libxserver_shm,
         libxserver_dpms,
         libxserver_xv,
