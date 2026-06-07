@@ -51,6 +51,7 @@
 #include "dix/rpcbuf_priv.h"
 #include "dix/screen_hooks_priv.h"
 #include "dix/screenint_priv.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "xfixesint.h"
 #include "scrnintstr.h"
@@ -351,6 +352,10 @@ CopyCursorToImage(CursorPtr pCursor, CARD32 *image)
 int
 ProcXFixesGetCursorImage(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_CURSOR)) {
+        return BadAccess;
+    }
+
 /*    REQUEST(xXFixesGetCursorImageReq); */
     CursorPtr pCursor;
     int npixels, width, height, rc, x, y;
@@ -469,6 +474,10 @@ ProcXFixesGetCursorName(ClientPtr client)
 int
 ProcXFixesGetCursorImageAndName(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_CURSOR)) {
+        return BadAccess;
+    }
+
 /*    REQUEST(xXFixesGetCursorImageAndNameReq); */
     CursorPtr pCursor;
     int npixels;
