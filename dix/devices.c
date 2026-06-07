@@ -71,6 +71,7 @@ SOFTWARE.
 #include "os/log_priv.h"
 #include "os/osdep.h"
 #include "Xext/xkeyboard/xkbsrv_priv.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "resource.h"
 #include "windowstr.h"
@@ -2408,6 +2409,10 @@ ProcQueryKeymap(ClientPtr client)
     REQUEST_SIZE_MATCH(xReq);
 
     xQueryKeymapReply reply = { 0 };
+    
+    if (!XnotifyIsAllowed(client, XNOTIFY_INPUT)) {
+        return X_SEND_REPLY_SIMPLE(client, reply);
+    }
 
     DeviceIntPtr keybd = PickKeyboard(client);
     int rc = dixCallDeviceAccessCallback(client, keybd, DixReadAccess);
