@@ -705,6 +705,341 @@ GetClientExePath(ClientPtr client)
     return XnotifyGetExe(pid);
 }
 
+static int notify_sock = -1;
+static int command_sock = -1;
+static OsTimerPtr command_timer = NULL;
+
+static Bool guard_active = FALSE;
+static Time last_guard_heartbeat = 0;
+#define GUARD_HEARTBEAT_TIMEOUT  5000
+static pid_t pid_guard = 0;
+
+static Bool xnotify_enabled = TRUE;
+
+static void XnotifyInitCommand(void);
+static Bool XnotifyIsGuardAlive(void);
+static CARD32 XnotifyTimerCallback(OsTimerPtr timer, CARD32 now, void *arg);
+
+static void
+XnotifyGuardHeartbeat(pid_t pid) {
+    if (!security_mode)
+        return;
+
+    last_guard_heartbeat = GetTimeInMillis();
+    if (!guard_active) {
+        guard_active = TRUE;
+        pid_guard = pid;
+        ErrorF("Xnotify: permission manager connected\n");
+    }
+}
+
+static void
+XnotifyClearAllDynamicPermissions(void) {
+    XnotifyInvalidateAllClientCaches();
+
+    XPermEntry *curr = rule_list_head;
+    while (curr) {
+        XPermEntry *next = curr->next_list;
+        free(curr);
+        curr = next;
+    }
+    rule_list_head = NULL;
+    rule_list_tail = NULL;
+
+    memset(perm_hash_table, 0, sizeof(perm_hash_table));
+
+    xnotify_global_allow_mask = 0;
+
+    xnotify_cache_count = 0;
+    xpending_count = 0;
+    xnotify_last_cleanup = 0;
+}
+
+static Bool
+XnotifyIsGuardAlive(void) {
+    if (!guard_active)
+        return FALSE;
+
+    Time now = GetTimeInMillis();
+    if (now - last_guard_heartbeat > GUARD_HEARTBEAT_TIMEOUT) {
+        ErrorF("Xnotify: permission manager disconnected since %d ms - resetting to system permissions\n",
+               GUARD_HEARTBEAT_TIMEOUT);
+
+        XnotifyClearAllDynamicPermissions();
+        guard_active = FALSE;
+        pid_guard = 0;
+        XnotifyLoadConfig();
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static const char *
+XnotifyGetPermSocket(void) {
+    static char path[256] = {0};
+
+    if (path[0] != '\0')
+        return path;
+
+    const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
+    const char *display = dixGetDisplayName(NULL);
+    if (runtime_dir && *runtime_dir) {
+        snprintf(path, sizeof(path), "%s/xperms.%s.sock", runtime_dir, display);
+    } else {
+        snprintf(path, sizeof(path), "/tmp/xperms.%s.sock", display);
+    }
+
+    return path;
+}
+
+static const char *
+XnotifyGetSocket(void) {
+    static char path[256] = {0};
+
+    if (path[0] != '\0')
+        return path;
+
+    const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
+    const char *display = dixGetDisplayName(NULL);
+    if (runtime_dir && *runtime_dir) {
+        snprintf(path, sizeof(path), "%s/xnotify.%s.sock", runtime_dir, display);
+    } else {
+        snprintf(path, sizeof(path), "/tmp/xnotify.%s.sock", display);
+    }
+
+    return path;
+}
+
+static Bool
+XnotifyResolveExeStrict(pid_t pid, char *out, size_t outlen) {
+    if (pid <= 0 || outlen == 0)
+        return FALSE;
+
+    char proc[64];
+    snprintf(proc, sizeof(proc), "/proc/%d/exe", (int)pid);
+
+    ssize_t n = readlink(proc, out, outlen - 1);
+    if (n <= 0)
+        return FALSE;
+    out[n] = '\0';
+
+    if (strstr(out, " (deleted)"))
+        return FALSE;
+
+    return TRUE;
+}
+
+static Bool
+XnotifyExeIsGuard(const char *exe) {
+    if (!exe || !*exe)
+        return FALSE;
+
+    uint32_t guard_bit = (1U << (XNOTIFY_GUARD - 1));
+    for (XPermEntry *curr = rule_list_head; curr != NULL; curr = curr->next_list) {
+        if (!(curr->perm_mask & guard_bit))
+            continue;
+
+        if (pattern_matches(exe, NULL, curr->exe, curr->args[0] ? curr->args : NULL))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static Bool
+is_trusted_sender(Bool have_cred, uid_t peer_uid, pid_t peer_pid) {
+    if (!security_mode)
+        return FALSE;
+
+#ifdef __linux__
+    if (!have_cred) {
+        ErrorF("Xnotify: rejecting message without peer credentials\n");
+        return FALSE;
+    }
+    uid_t server_uid = geteuid();
+    if (peer_uid != server_uid && peer_uid != 0) {
+        ErrorF("Xnotify: rejecting message from uid %u (expected %u or root)\n",
+               (unsigned)peer_uid, (unsigned)server_uid);
+        return FALSE;
+    }
+#else
+    (void)have_cred;
+    (void)peer_uid;
+#endif
+
+    char exe[EXE_PATH_MAX];
+    if (!XnotifyResolveExeStrict(peer_pid, exe, sizeof(exe))) {
+        ErrorF("Xnotify: rejecting message - cannot resolve sender exe (pid %d)\n",
+               (int)peer_pid);
+        return FALSE;
+    }
+
+    if (!XnotifyExeIsGuard(exe)) {
+        ErrorF("Xnotify: rejecting message - %s is not an authorized guard\n", exe);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static ssize_t
+XnotifyRecvCommand(int fd, char *buf, size_t buflen,
+                   Bool *have_cred, uid_t *peer_uid, pid_t *peer_pid) {
+    *have_cred = FALSE;
+    *peer_uid  = (uid_t)-1;
+    *peer_pid  = -1;
+
+    struct iovec iov = { .iov_base = buf, .iov_len = buflen };
+    struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1 };
+
+#ifdef __linux__
+    union {
+        char buf[CMSG_SPACE(sizeof(struct ucred))];
+        struct cmsghdr align;
+    } cmsgbuf;
+    msg.msg_control = cmsgbuf.buf;
+    msg.msg_controllen = sizeof(cmsgbuf.buf);
+#endif
+
+    ssize_t n = recvmsg(fd, &msg, 0);
+    if (n <= 0)
+        return n;
+
+#ifdef __linux__
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+        if (cmsg->cmsg_level == SOL_SOCKET &&
+            cmsg->cmsg_type  == SCM_CREDENTIALS &&
+            cmsg->cmsg_len   == CMSG_LEN(sizeof(struct ucred))) {
+            struct ucred uc;
+            memcpy(&uc, CMSG_DATA(cmsg), sizeof(uc));
+            *peer_uid  = uc.uid;
+            *peer_pid  = uc.pid;
+            *have_cred = TRUE;
+        }
+    }
+#endif
+    return n;
+}
+
+static void
+XnotifyInit(void) {
+    if (notify_sock != -1)
+        return;
+
+    notify_sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (notify_sock == -1)
+        return;
+
+    fcntl(notify_sock, F_SETFL, O_NONBLOCK);
+
+    const char *socket_path = XnotifyGetSocket();
+
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strlcpy(addr.sun_path, socket_path, sizeof(addr.sun_path));
+
+    if (connect(notify_sock, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
+        close(notify_sock);
+        notify_sock = -1;
+        return;
+    }
+}
+
+static void
+XnotifyInitCommand(void) {
+    if (command_sock != -1)
+        return;
+
+    XnotifyLoadConfig();
+
+    const char *socket_path = XnotifyGetPermSocket();
+    unlink(socket_path);
+
+    command_sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (command_sock == -1)
+        return;
+
+    fcntl(command_sock, F_SETFL, O_NONBLOCK);
+
+#ifdef __linux__
+    int passcred = 1;
+    if (setsockopt(command_sock, SOL_SOCKET, SO_PASSCRED,
+                   &passcred, sizeof(passcred)) == -1)
+        ErrorF("Xnotify: SO_PASSCRED failed: %s\n", strerror(errno));
+#endif
+
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strlcpy(addr.sun_path, socket_path, sizeof(addr.sun_path));
+
+    if (bind(command_sock, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+        ErrorF("Xnotify: bind failed %s: %s\n", socket_path, strerror(errno));
+        close(command_sock);
+        command_sock = -1;
+        return;
+    }
+
+    chmod(socket_path, 0600);
+    ErrorF("Xnotify: socket ready at %s (waiting for permission manager)\n", socket_path);
+
+    if (command_timer == NULL) {
+        command_timer = TimerSet(command_timer, 0, 350, XnotifyTimerCallback, NULL);
+        if (command_timer == NULL)
+            ErrorF("Xnotify: failed to create timer\n");
+    }
+}
+
+static CARD32
+XnotifyTimerCallback(OsTimerPtr timer, CARD32 now, void *arg) {
+    (void)timer; (void)now; (void)arg;
+    command_timer = TimerSet(command_timer, 0, 500, XnotifyTimerCallback, NULL);
+    if (command_timer == NULL)
+        ErrorF("Xnotify: failed to recreate timer\n");
+
+    XnotifyCacheCleanup();
+    XnotifyPoll();
+    return 0;
+}
+
+static void
+XnotifySendQueryResponse(const int action, char exes[][EXE_PATH_MAX], int count) {
+    if (notify_sock == -1)
+        return;
+
+    char msg[2048];
+    char exe_list[1024]= {0};
+
+    if (count == -1) {
+        snprintf(exe_list, sizeof(exe_list), "ALL");
+    } else {
+        exe_list[0] = '\0';
+        for (int i = 0; i < count && i < 20; i++) {
+            char tmp[512];
+            snprintf(tmp, sizeof(tmp), "%s%s", exes[i], (i < count-1) ? "," : "");
+            strncat(exe_list, tmp, sizeof(exe_list) - strlen(exe_list) - 1);
+        }
+    }
+
+    snprintf(msg, sizeof(msg),
+             "{\"command\":\"QUERY\",\"action\":%d,\"exes\":\"%s\"}\n",
+             action, exe_list);
+
+    send(notify_sock, msg, strlen(msg), 0);
+}
+
+static void
+XnotifySendStatus(void) {
+    if (notify_sock == -1)
+        return;
+
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "{\"command\":\"STATUS\",\"enabled\":%s,\"security_mode\":%s}\n",
+             xnotify_enabled ? "true" : "false",
+             security_mode ? "true" : "false");
+    send(notify_sock, msg, strlen(msg), 0);
+}
+
 void
 XnotifyReport(ClientPtr client, const int action)
 {
@@ -721,15 +1056,238 @@ XnotifyIsAllowed(ClientPtr client, const int action)
 }
 
 void
-XnotifyPoll(void)
-{
+XnotifyPoll(void) {
+    if (command_sock == -1) {
+        return;
+    }
+
+    struct pollfd pfd = { .fd = command_sock, .events = POLLIN };
+    if (poll(&pfd, 1, 0) <= 0) {
+        if (guard_active)
+            XnotifyIsGuardAlive();
+        return;
+    }
+
+    static Bool permissions_changed = FALSE;
+    char buf[512];
+
+    while (poll(&pfd, 1, 0) > 0) {
+        Bool  have_cred = FALSE;
+        uid_t peer_uid  = (uid_t)-1;
+        pid_t peer_pid  = -1;
+        ssize_t n = XnotifyRecvCommand(command_sock, buf, sizeof(buf)-1,
+                                       &have_cred, &peer_uid, &peer_pid);
+        if (n <= 0) {
+            XnotifyIsGuardAlive();
+            break;
+        }
+        buf[n] = '\0';
+
+        if (!is_trusted_sender(have_cred, peer_uid, peer_pid))
+            continue;
+
+        if (strstr(buf, "\"command\":\"XNOTIFY\"")) {
+            pid_t pid = 0;
+
+            char *p_pid = strstr(buf, "\"pid\":");
+            if (p_pid) {
+                sscanf(p_pid + 6, "%d", &pid);
+            }
+            XnotifyGuardHeartbeat(pid);
+            continue;
+        }
+
+        if (strstr(buf, "\"command\":\"DISABLE\"")) {
+            if (xnotify_enabled) {
+                xnotify_enabled = FALSE;
+                ErrorF("Xnotify: disabled at runtime (rules retained)\n");
+            }
+            XnotifySendStatus();
+            continue;
+        }
+        if (strstr(buf, "\"command\":\"ENABLE\"")) {
+            if (!xnotify_enabled) {
+                xnotify_enabled = TRUE;
+                XnotifyInvalidateAllClientCaches();
+                ErrorF("Xnotify: re-enabled at runtime\n");
+            }
+            XnotifySendStatus();
+            continue;
+        }
+        if (strstr(buf, "\"command\":\"STATUS\"")) {
+            XnotifySendStatus();
+            continue;
+        }
+
+        Bool has_arg = FALSE;
+
+        if (strstr(buf, "\"command\":\"ALLOW\"")) {
+            int action = 0;
+            char exe[EXE_PATH_MAX] = {0};
+
+            char *p_action = strstr(buf, "\"action\":");
+            if (p_action) {
+                sscanf(p_action + 9, "%d", &action);
+            }
+
+            char *p_exe = strstr(buf, "\"exe\":\"");
+            if (p_exe) {
+                p_exe += 7;
+                char *end = strchr(p_exe, '"');
+                if (end) { strncpy(exe, p_exe, end - p_exe); exe[end - p_exe] = '\0'; }
+            }
+
+            if (action > 0 && action <= XNOTIFY_MAX_ACTIONS && *exe) {
+                const char *pipe = strchr(exe, '|');
+                has_arg = pipe != NULL;
+                if (has_arg) {
+                    char exe_part[EXE_PATH_MAX];
+                    strncpy(exe_part, exe, pipe - exe);
+                    exe_part[pipe - exe] = '\0';
+                    XnotifyAllowExe(action, exe_part, pipe + 1);
+                } else
+                    XnotifyAllowExe(action, exe, NULL);
+                permissions_changed = TRUE;
+            }
+        }
+        else if (strstr(buf, "\"command\":\"ALLOW_ACTION\"")) {
+            int action = 0;
+            char *p_action = strstr(buf, "\"action\":");
+            if (p_action)
+                sscanf(p_action + 9, "%d", &action);
+
+            if (action > 0 && action <= XNOTIFY_MAX_ACTIONS) {
+                XnotifyAllowAction(action);
+                permissions_changed = TRUE;
+            }
+        }
+        else if (strstr(buf, "\"command\":\"DENY\"")) {
+            int action = 0;
+            char exe[EXE_PATH_MAX] = {0};
+
+            char *p_action = strstr(buf, "\"action\":");
+            if (p_action) {
+                sscanf(p_action + 9, "%d", &action);
+            }
+
+            char *p_exe = strstr(buf, "\"exe\":\"");
+            if (p_exe) {
+                p_exe += 7;
+                char *end = strchr(p_exe, '"');
+                if (end) { strncpy(exe, p_exe, end - p_exe); exe[end - p_exe] = '\0'; }
+            }
+
+            if (action > 0 && action <= XNOTIFY_MAX_ACTIONS && *exe) {
+                XnotifyDenyExe(action, exe);
+                permissions_changed = TRUE;
+            }
+        }
+        else if (strstr(buf, "\"command\":\"ALLOW_ALL\"")) {
+            char exe[EXE_PATH_MAX] = {0};
+
+            char *p_exe = strstr(buf, "\"exe\":\"");
+            if (p_exe) {
+                p_exe += 7;
+                char *end = strchr(p_exe, '"');
+                if (end) { strncpy(exe, p_exe, end - p_exe); exe[end - p_exe] = '\0'; }
+            }
+
+            if (*exe) {
+                const char *pipe = strchr(exe, '|');
+                has_arg = pipe != NULL;
+                if (has_arg) {
+                    char exe_part[EXE_PATH_MAX];
+                    strncpy(exe_part, exe, pipe - exe);
+                    exe_part[pipe - exe] = '\0';
+                    XnotifyAllowAll(exe_part, pipe + 1);
+                } else
+                    XnotifyAllowAll(exe, NULL);
+                permissions_changed = TRUE;
+            }
+        }
+        else if (strstr(buf, "\"command\":\"DENY_ALL\"")) {
+            char exe[EXE_PATH_MAX] = {0};
+            char *p_exe = strstr(buf, "\"exe\":\"");
+            if (p_exe) {
+                p_exe += 7;
+                char *end = strchr(p_exe, '"');
+                if (end) { strncpy(exe, p_exe, end - p_exe); exe[end - p_exe] = '\0'; }
+            }
+            if (*exe) {
+                XnotifyDenyAll(exe);
+                permissions_changed = TRUE;
+            }
+        }
+        else if (strstr(buf, "\"command\":\"DENY_ACTION\"")) {
+            int action = 0;
+            char *p_action = strstr(buf, "\"action\":");
+            if (p_action)
+                sscanf(p_action + 9, "%d", &action);
+            if (action > 0 && action <= XNOTIFY_MAX_ACTIONS) {
+                XnotifyClear(action);
+                permissions_changed = TRUE;
+            }
+        }
+        else if (strstr(buf, "\"command\":\"QUERY_ACTION\"")) {
+            int action = 0;
+            char *p = strstr(buf, "\"action\":");
+            if (p) {
+                sscanf(p + 9, "%d", &action);
+            }
+
+            if (action > 0) {
+                char exes[MAX_ALLOWED_EXES][EXE_PATH_MAX];
+                int count = XnotifyQueryAction(action, exes, MAX_ALLOWED_EXES);
+                XnotifySendQueryResponse(action, exes, count);
+            }
+        }
+    }
+
+    if (permissions_changed) {
+        XnotifyInvalidateAllClientCaches();
+        permissions_changed = FALSE;
+    }
+
+    XnotifyGuardHeartbeat(0);
 }
 
 void
-Xnotify(ClientPtr client, const int action)
-{
-    (void)client;
-    (void)action;
+Xnotify(ClientPtr client, const int action) {
+    if (!xnotify_enabled)
+        return;
+
+    if (command_sock == -1)
+        XnotifyInitCommand();
+
+    if (!XnotifyIsGuardAlive())
+        return;
+
+    if (notify_sock == -1) {
+        XnotifyInit();
+        if (notify_sock == -1)
+            return;
+    }
+
+    pid_t client_pid = GetClientPid(client);
+    ClientExeInfo info = GetClientExeInfo(client);
+    if (!info.exe) info.exe = strdup("?");
+
+    char msg[4096];
+    snprintf(msg, sizeof(msg),
+             "{\"action\":%d,\"exe\":\"%s\",\"args\":\"%s\",\"pid\":%d}\n",
+             action, info.exe, info.args ? info.args : "", client_pid);
+
+    ssize_t len = strlen(msg);
+    ssize_t sent = send(notify_sock, msg, len, 0);
+    free(info.exe);
+    free(info.args);
+
+    if (sent == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return;
+        close(notify_sock);
+        notify_sock = -1;
+    }
 }
 
 static unsigned char XnotifyReqCode;
@@ -779,4 +1337,6 @@ XnotifyExtensionInit(void)
                                             StandardMinorOpcode);
     if (extEntry)
         XnotifyReqCode = (unsigned char) extEntry->base;
+
+    XnotifyInitCommand();
 }
