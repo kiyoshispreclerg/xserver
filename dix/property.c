@@ -48,6 +48,7 @@ SOFTWARE.
 
 #include <X11/X.h>
 #include <X11/Xproto.h>
+#include <X11/Xatom.h>
 
 #include "dix/dix_priv.h"
 #include "dix/input_priv.h"
@@ -59,6 +60,7 @@ SOFTWARE.
 #include "Xext/panoramiX/panoramiX.h"
 #include "Xext/panoramiX/panoramiX_priv.h"
 #include "Xext/panoramiX/panoramiXsrv.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "windowstr.h"
 #include "propertyst.h"
@@ -337,6 +339,10 @@ ProcChangeProperty(ClientPtr client)
     err = dixLookupWindow(&pWin, p.window, p.client, DixSetPropAccess);
     if (err != Success)
         return err;
+    if (pWin->owner != client && !XnotifyIsAllowed(client, XNOTIFY_MANAGE)) {
+        client->errorValue = stuff->window;
+        return BadAccess;
+    }
 
     return dixChangeWindowProperty(p.client, pWin, p.property, p.type, p.format,
                                    p.mode, p.len, p.value, p.sendevent);
@@ -586,6 +592,15 @@ ProcGetProperty(ClientPtr client)
     else if (rc != Success)
         return rc;
 
+    if (pWin->owner != client && !XnotifyIsAllowed(client, XNOTIFY_MANAGE)) {
+        Atom utf8Atom = MakeAtom("UTF8_STRING", 11, FALSE);
+        if (pProp->type == XA_STRING ||
+            (utf8Atom != BAD_RESOURCE && pProp->type == utf8Atom)) {
+            xGetPropertyReply reply = { 0 };
+            return X_SEND_REPLY_SIMPLE(client, reply);
+        }
+    }
+
     /* If the request type and actual type don't match. Return the
        property information, but not the data. */
 
@@ -691,6 +706,11 @@ ProcListProperties(ClientPtr client)
     int rc = dixLookupWindow(&pWin, stuff->id, client, DixListPropAccess);
     if (rc != Success)
         return rc;
+
+    if (pWin->owner != client && !XnotifyIsAllowed(client, XNOTIFY_MANAGE)) {
+        client->errorValue = stuff->id;
+        return BadAccess;
+    }
 
     x_rpcbuf_t rpcbuf = { .swapped = client->swapped, .err_clear = TRUE };
 
