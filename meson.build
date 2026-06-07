@@ -824,6 +824,7 @@ if build_xserver
         libxserver_dri3,
         libxserver_xinerama,
         libxserver_xf86bigfont,
+        libxserver_xnotify,
         libxserver_shm,
         libxserver_dpms,
         libxserver_xv,
