@@ -57,6 +57,8 @@ SOFTWARE.
 #include "dispatch.h"
 #include "xace.h"
 
+#include "Xext/xnotify/xnotify.h"
+
 /*****************************************************************
  * Selection Stuff
  *
@@ -156,6 +158,10 @@ int
 ProcSetSelectionOwner(ClientPtr client)
 {
     X_REQUEST_HEAD_STRUCT(xSetSelectionOwnerReq);
+
+    if (!XnotifyIsAllowed(client, XNOTIFY_SELECTION)) {
+        return Success;
+    }
     X_REQUEST_FIELD_CARD32(window);
     X_REQUEST_FIELD_CARD32(selection);
     X_REQUEST_FIELD_CARD32(time);
@@ -247,6 +253,13 @@ ProcGetSelectionOwner(ClientPtr client)
 {
     X_REQUEST_HEAD_STRUCT(xResourceReq);
     X_REQUEST_FIELD_CARD32(id);
+    
+    if (!XnotifyIsAllowed(client, XNOTIFY_SELECTION)) {
+        xGetSelectionOwnerReply reply = { .owner = None };
+        if (client->swapped)
+            swapl(&reply.owner);
+        return X_SEND_REPLY_SIMPLE(client, reply);
+    }
 
     Selection *pSel;
 
@@ -291,14 +304,26 @@ out:
 int
 ProcConvertSelection(ClientPtr client)
 {
+    REQUEST(xConvertSelectionReq);
+    REQUEST_SIZE_MATCH(xConvertSelectionReq);
+
+    if (!XnotifyIsAllowed(client, XNOTIFY_SELECTION)) {
+        xEvent event = {0};
+        event.u.u.type = SelectionNotify;
+        event.u.selectionNotify.time = stuff->time;
+        event.u.selectionNotify.requestor = stuff->requestor;
+        event.u.selectionNotify.selection = stuff->selection;
+        event.u.selectionNotify.target = stuff->target;
+        event.u.selectionNotify.property = None;
+        WriteEventsToClient(client, 1, &event);
+        return Success;
+    }
+
     bool paramsOkay;
     xEvent event;
     WindowPtr pWin;
     Selection *pSel;
     int rc;
-
-    REQUEST(xConvertSelectionReq);
-    REQUEST_SIZE_MATCH(xConvertSelectionReq);
 
     /* allow extensions to intercept */
     SelectionFilterParamRec param = {
