@@ -63,6 +63,7 @@ in this Software without prior written authorization from The Open Group.
 
 #include "shm_priv.h"
 #include "shm_intern.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "os.h"
 #include "dixstruct_priv.h"
@@ -328,6 +329,10 @@ shm_access(ClientPtr client, SHMPERM_TYPE * perm, int readonly)
 static int
 ProcShmAttach(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_ATTACH)) {
+        return BadAccess;
+    }
+
     X_REQUEST_HEAD_STRUCT(xShmAttachReq);
     X_REQUEST_FIELD_CARD32(shmseg);
     X_REQUEST_FIELD_CARD32(shmid);
@@ -638,6 +643,21 @@ ShmGetImage(ClientPtr client, xShmGetImageReq *stuff)
 
     VERIFY_SHMSIZE(shmdesc, stuff->offset, length, client);
 
+    if (!XnotifyIsAllowed(client, XNOTIFY_SCREEN)) {
+        memset(shmdesc->addr + stuff->offset, 0, length);
+
+        xShmGetImageReply reply = {
+            .depth = pDraw->depth,
+            .size = length,
+            .visual = visual,
+        };
+
+        X_REPLY_FIELD_CARD32(visual);
+        X_REPLY_FIELD_CARD32(size);
+
+        return X_SEND_REPLY_SIMPLE(client, reply);
+    }
+
     if (length == 0) {
         /* nothing to do */
     }
@@ -898,6 +918,11 @@ static int
 ProcShmCreatePixmap(ClientPtr client)
 {
     X_REQUEST_HEAD_STRUCT(xShmCreatePixmapReq);
+    
+    if (!XnotifyIsAllowed(client, XNOTIFY_SCREEN)) {
+        return BadAccess;
+    }
+    
     X_REQUEST_FIELD_CARD32(pid);
     X_REQUEST_FIELD_CARD32(drawable);
     X_REQUEST_FIELD_CARD16(width);
