@@ -805,6 +805,7 @@ libxserver = [
     libxserver_xfixes,
     libxserver_xi,
     libxserver_xkb,
+    libxserver_xnotify,
     libxserver_record,
 
     libxserver_os,

@@ -168,6 +168,7 @@ static const ExtensionModule staticExtensions[] = {
 #ifdef GLXEXT
     {GlxExtensionInit, "GLX", &noGlxExtension},
 #endif
+    {XnotifyExtensionInit, "XNOTIFY", &noXnotifyExtension}
 };
 
 void

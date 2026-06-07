@@ -26,6 +26,7 @@ extern Bool noTestExtensions;
 extern Bool noXFixesExtension;
 extern Bool noXFree86BigfontExtension;
 extern Bool noNamespaceExtension;
+extern Bool noXnotifyExtension;
 
 extern Bool PanoramiXExtensionDisabledHack;
 
@@ -63,5 +64,6 @@ void dri3_extension_init(void);
 void PseudoramiXExtensionInit(void);
 void present_extension_init(void);
 void NamespaceExtensionInit(void);
+void XnotifyExtensionInit(void);
 
 #endif /* _XSERVER_EXTINIT_PRIV_H */

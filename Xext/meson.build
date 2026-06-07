@@ -61,6 +61,7 @@ libxserver_xext = static_library('xserver_xext',
     dependencies: common_dep,
 )
 
+subdir('xnotify')
 if build_xorg
     install_data(hdrs_xext, install_dir: xorgsdkdir)
 endif
