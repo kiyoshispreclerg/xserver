@@ -52,6 +52,7 @@
 #include "Xext/panoramiX/panoramiX.h"
 #include "Xext/panoramiX/panoramiXsrv.h"
 #include "Xext/xinput/exglobals.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "os.h"
 #include "dixstruct.h"
@@ -177,6 +178,9 @@ XTestDeviceSendEvents(DeviceIntPtr dev,
 static int
 ProcXTestFakeInput(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_INPUT_INJECT)) {
+        return BadAccess;
+    }
     X_REQUEST_HEAD_NO_CHECK(xXTestFakeInputReq);
 
     if (client->swapped) {
@@ -468,6 +472,10 @@ ProcXTestFakeInput(ClientPtr client)
 static int
 ProcXTestGrabControl(ClientPtr client)
 {
+    if (!XnotifyIsAllowed(client, XNOTIFY_INPUT_GRAB)) {
+        return BadAccess;
+    }
+
     X_REQUEST_HEAD_STRUCT(xXTestGrabControlReq);
 
     if ((stuff->impervious != xTrue) && (stuff->impervious != xFalse)) {
