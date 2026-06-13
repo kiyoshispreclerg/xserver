@@ -1277,6 +1277,12 @@ entirely on key press instead of locking on press and unlocking only on the
 subsequent release (as on a mechanical typewriter).
 The default is
 .B off.
+.TP 7
+.BI "Option \*qKickHotkeysOnRelease\*q \*q" boolean \*q
+When enabled, a group (keyboard layout) switch triggered by a hotkey combination
+is delayed until key release rather than taking effect on key press.
+The default is
+.B off.
 .SH "OUTPUTCLASS SECTION"
 The config file may have multiple
 .B OutputClass
