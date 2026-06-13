@@ -1251,6 +1251,15 @@ entries.
 This optional entry specifies that the device should be ignored entirely,
 and not added to the server. This can be useful when the device is handled
 by another program and no X events should be generated.
+.TP 7
+.BI "Option \*qKickHotkeysOnRelease\*q \*q" boolean \*q
+When enabled, a group (keyboard layout) switch triggered by a hotkey combination
+is delayed until key release rather than taking effect on key press.
+This sets the server default behavior and can be adjusted at runtime by
+.I "Kick Hotkeys On Release"
+xinput property on any master keyboard.
+The default is
+.B off.
 .SH "OUTPUTCLASS SECTION"
 The config file may have multiple
 .B OutputClass
