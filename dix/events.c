@@ -5266,6 +5266,27 @@ GrabDevice(ClientPtr client, DeviceIntPtr dev,
 
     time = ClientTimeToServerTime(ctime);
     grab = grabInfo->grab;
+    /*
+     * An authorized client (e.g. a screen locker) may steal a grab currently
+     * held by another client instead of getting AlreadyGrabbed.  Rather than
+     * forcibly deactivating the old grab, we let the activation path below
+     * *replace* it: ActivatePointerGrab/ActivateKeyboardGrab emit NotifyGrab
+     * crossing/focus events out of the old grab's window, which is the signal
+     * toolkits (GTK/Qt) rely on to pop down their menus.  A plain
+     * DeactivateGrab would emit NotifyUngrab instead and leave the menu mapped
+     * and unfocused.  We only clear the *local* grab variable so the status
+     * checks below are skipped; grabInfo->grab stays set so ActivateGrab
+     * replaces it and notifies the previous holder.
+     */
+    if (grab && !SameClient(grab, client) &&
+        XnotifyIsAllowed(client, XNOTIFY_GRAB_OVERRIDE)) {
+        /* ActivateGrab frees the old grab without clearing dangling sync
+         * references to it, so drop them here as DeactivateGrab would. */
+        for (DeviceIntPtr odev = inputInfo.devices; odev; odev = odev->next)
+            if (odev->deviceGrab.sync.other == grab)
+                odev->deviceGrab.sync.other = NullGrab;
+        grab = NULL;
+    }
     if (grab && grab->grabtype != grabtype)
         *status = AlreadyGrabbed;
     else if (grab && !SameClient(grab, client))
