@@ -181,7 +181,8 @@ static struct dev_properties {
     {0, BTN_LABEL_PROP_BTN_TOOL_TRIPLETAP},
     {0, BTN_LABEL_PROP_BTN_GEAR_DOWN},
     {0, BTN_LABEL_PROP_BTN_GEAR_UP},
-    {0, XI_PROP_TRANSFORM}
+    {0, XI_PROP_TRANSFORM},
+    {0, XKB_PROP_KICK_HOTKEYS_ON_RELEASE}
 };
 
 static long XIPropHandlerID = 1;
