@@ -657,6 +657,7 @@ typedef enum {
     FLAG_IGLX,
     FLAG_DEBUG,
     FLAG_ALLOW_BYTE_SWAPPED_CLIENTS,
+    FLAG_DISABLE_PRIMARY_SELECTION,
 } FlagValues;
 
 /**
@@ -717,6 +718,8 @@ static OptionInfoRec FlagOptions[] = {
     {FLAG_DEBUG, "Debug", OPTV_STRING,
      {0}, FALSE},
     {FLAG_ALLOW_BYTE_SWAPPED_CLIENTS, "AllowByteSwappedClients", OPTV_BOOLEAN,
+     {0}, FALSE},
+    {FLAG_DISABLE_PRIMARY_SELECTION, "DisablePrimarySelection", OPTV_BOOLEAN,
      {0}, FALSE},
     {-1, NULL, OPTV_NONE,
      {0}, FALSE},
@@ -814,6 +817,13 @@ configServerFlags(XF86ConfFlagsPtr flagsconf, XF86OptionPtr layoutopts)
     }
     LogMessageVerb(from, 1, "%sutomatically binding GPU devices\n",
                    xf86Info.autoBindGPU ? "A" : "Not a");
+
+    if (!noPrimarySelection &&
+        xf86GetOptValBool(FlagOptions, FLAG_DISABLE_PRIMARY_SELECTION, &value) &&
+        value) {
+        noPrimarySelection = TRUE;
+        LogMessageVerb(X_CONFIG, 1, "Primary selection disabled\n");
+    }
 
     /*
      * Set things up based on the config file information.  Some of these

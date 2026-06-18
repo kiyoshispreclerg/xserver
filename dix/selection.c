@@ -46,6 +46,8 @@ SOFTWARE.
 
 #include <dix-config.h>
 
+#include <X11/Xatom.h>
+
 #include "dix/dix_priv.h"
 #include "dix/request_priv.h"
 #include "dix/selection_priv.h"
@@ -159,6 +161,9 @@ ProcSetSelectionOwner(ClientPtr client)
         return Success;
     }
 
+    if (noPrimarySelection && stuff->selection == XA_PRIMARY)
+        return Success;
+
     WindowPtr pWin = NULL;
     TimeStamp time;
     Selection *pSel;
@@ -253,7 +258,8 @@ ProcSetSelectionOwner(ClientPtr client)
 int
 ProcGetSelectionOwner(ClientPtr client)
 {
-    if (!XnotifyIsAllowed(client, XNOTIFY_SELECTION)) {
+    if ((noPrimarySelection && stuff->id == XA_PRIMARY) ||
+        !XnotifyIsAllowed(client, XNOTIFY_SELECTION)) {
         xGetSelectionOwnerReply reply = { .owner = None };
         if (client->swapped)
             swapl(&reply.owner);
@@ -312,7 +318,8 @@ ProcConvertSelection(ClientPtr client)
     REQUEST(xConvertSelectionReq);
     REQUEST_SIZE_MATCH(xConvertSelectionReq);
 
-    if (!XnotifyIsAllowed(client, XNOTIFY_SELECTION)) {
+    if ((noPrimarySelection && stuff->selection == XA_PRIMARY) ||
+        !XnotifyIsAllowed(client, XNOTIFY_SELECTION)) {
         xEvent event = {0};
         event.u.u.type = SelectionNotify;
         event.u.selectionNotify.time = stuff->time;
@@ -329,6 +336,7 @@ ProcConvertSelection(ClientPtr client)
     WindowPtr pWin;
     Selection *pSel;
     int rc;
+
 
     /* allow extensions to intercept */
     SelectionFilterParamRec param = {
