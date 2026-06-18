@@ -67,6 +67,7 @@ int dixLookupSelection(Selection **result,
                        Mask access_mode);
 
 void InitSelections(void);
+void InitSelectionProperty(void);
 void DeleteWindowFromAnySelections(WindowPtr pWin);
 void DeleteClientFromAnySelections(ClientPtr client);
 
