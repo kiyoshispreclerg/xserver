@@ -184,13 +184,14 @@ dix_main(int argc, char *argv[], char *envp[])
         SetInputCheck(&alwaysCheckForInput[0], &alwaysCheckForInput[1]);
         screenInfo.numScreens = 0;
 
-        InitAtoms();
-        InitEvents();
-        xfont2_init_glyph_caching();
-        dixResetRegistry();
-        InitFonts();
-        InitCallbackManager();
-        InitOutput(argc, argv);
+    InitAtoms();
+    InitEvents();
+    xfont2_init_glyph_caching();
+    dixResetRegistry();
+    InitFonts();
+    InitCallbackManager();
+    InitSelectionProperty();
+    InitOutput(argc, argv);
 
         if (screenInfo.numScreens < 1)
             FatalError("no screens found");
