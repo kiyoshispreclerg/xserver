@@ -356,6 +356,21 @@ ApplyAutoRepeat(DeviceIntPtr dev)
     xkbi->desc->ctrls->repeat_interval = 1000 / rate;
 }
 
+static void
+ApplyXkbToggleTiming(DeviceIntPtr dev)
+{
+    InputInfoPtr pInfo = (InputInfoPtr) dev->public.devicePrivate;
+
+    if (!dev->key)
+        return;
+
+    if (xf86SetBoolOption(pInfo->options, "KickHotkeysOnRelease", FALSE)) {
+        xkbSwitchGroupOnRelease = TRUE;
+        LogMessageVerb(X_CONFIG, 1, "%s: group (layout) switch on release\n",
+                       pInfo->name);
+    }
+}
+
 /***********************************************************************
  *
  * xf86ProcessCommonOptions --
@@ -893,6 +908,7 @@ xf86InputDevicePostInit(DeviceIntPtr dev)
     ApplyAccelerationSettings(dev);
     ApplyTransformationMatrix(dev);
     ApplyAutoRepeat(dev);
+    ApplyXkbToggleTiming(dev);
     return Success;
 }
 
