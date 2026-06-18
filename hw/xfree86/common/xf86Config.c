@@ -668,6 +668,7 @@ typedef enum {
     FLAG_ALLOW_BYTE_SWAPPED_CLIENTS,
     FLAG_SINGLE_DRIVER,
     FLAG_FONTSERVER,
+    FLAG_DISABLE_PRIMARY_SELECTION,
 } FlagValues;
 
 /**
@@ -734,6 +735,8 @@ static OptionInfoRec FlagOptions[] = {
     {FLAG_SINGLE_DRIVER, "SingleDriver", OPTV_BOOLEAN,
      {0}, FALSE},
     {FLAG_FONTSERVER, "FontServerConnections", OPTV_BOOLEAN,
+     {0}, FALSE},
+    {FLAG_DISABLE_PRIMARY_SELECTION, "DisablePrimarySelection", OPTV_BOOLEAN,
      {0}, FALSE},
     {-1, NULL, OPTV_NONE,
      {0}, FALSE},
@@ -846,6 +849,13 @@ configServerFlags(XF86ConfFlagsPtr flagsconf, XF86OptionPtr layoutopts)
     }
     LogMessageVerb(from, 1, "Allowing %s one driver to add non-GPU screens\n",
                    xf86Info.singleDriver ? "only" : "more than");
+
+    if (!noPrimarySelection &&
+        xf86GetOptValBool(FlagOptions, FLAG_DISABLE_PRIMARY_SELECTION, &value) &&
+        value) {
+        noPrimarySelection = TRUE;
+        LogMessageVerb(X_CONFIG, 1, "Primary selection disabled\n");
+    }
 
     /*
      * Set things up based on the config file information.  Some of these
