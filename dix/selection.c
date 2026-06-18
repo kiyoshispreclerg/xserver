@@ -161,9 +161,6 @@ ProcSetSelectionOwner(ClientPtr client)
         return Success;
     }
 
-    if (noPrimarySelection && stuff->selection == XA_PRIMARY)
-        return Success;
-
     WindowPtr pWin = NULL;
     TimeStamp time;
     Selection *pSel;
@@ -171,6 +168,9 @@ ProcSetSelectionOwner(ClientPtr client)
 
     REQUEST(xSetSelectionOwnerReq);
     REQUEST_SIZE_MATCH(xSetSelectionOwnerReq);
+
+    if (noPrimarySelection && stuff->selection == XA_PRIMARY)
+        return Success;
 
     if (client->swapped) {
         swapl(&stuff->window);
@@ -258,6 +258,11 @@ ProcSetSelectionOwner(ClientPtr client)
 int
 ProcGetSelectionOwner(ClientPtr client)
 {
+    Selection *pSel;
+
+    REQUEST(xResourceReq);
+    REQUEST_SIZE_MATCH(xResourceReq);
+
     if ((noPrimarySelection && stuff->id == XA_PRIMARY) ||
         !XnotifyIsAllowed(client, XNOTIFY_SELECTION)) {
         xGetSelectionOwnerReply reply = { .owner = None };
@@ -265,11 +270,6 @@ ProcGetSelectionOwner(ClientPtr client)
             swapl(&reply.owner);
         return X_SEND_REPLY_SIMPLE(client, reply);
     }
-
-    Selection *pSel;
-
-    REQUEST(xResourceReq);
-    REQUEST_SIZE_MATCH(xResourceReq);
 
     if (client->swapped)
         swapl(&stuff->id);
