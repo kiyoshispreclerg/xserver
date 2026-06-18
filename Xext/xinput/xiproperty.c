@@ -184,7 +184,8 @@ static struct dev_properties {
     {0, BTN_LABEL_PROP_BTN_GEAR_DOWN},
     {0, BTN_LABEL_PROP_BTN_GEAR_UP},
     {0, XI_PROP_TRANSFORM},
-    {0, XKB_PROP_LOCK_MODS_ON_PRESS}
+    {0, XKB_PROP_LOCK_MODS_ON_PRESS},
+    {0, XKB_PROP_KICK_HOTKEYS_ON_RELEASE}
 };
 
 static long XIPropHandlerID = 1;
