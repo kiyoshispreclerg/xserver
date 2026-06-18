@@ -123,4 +123,5 @@ int monitorResolution = 0;
 bool autosetDPI = false;
 
 Bool explicit_display = FALSE;
+Bool noPrimarySelection = FALSE;
 char *ConnectionInfo;
