@@ -51,7 +51,9 @@ SOFTWARE.
 #include <stdbool.h>
 
 #include "dix/dix_priv.h"
+#include "dix/property_priv.h"
 #include "dix/request_priv.h"
+#include "dix/screenint_priv.h"
 #include "dix/selection_priv.h"
 
 #include "windowstr.h"
@@ -60,6 +62,8 @@ SOFTWARE.
 #include "xace.h"
 
 #include "Xext/xnotify/xnotify.h"
+
+#define DISABLE_PRIMARY_SELECTION_PROP "_DisablePrimarySelection"
 
 /*****************************************************************
  * Selection Stuff
@@ -105,6 +109,53 @@ dixLookupSelection(Selection ** result, Atom selectionName,
 
     *result = pSel;
     return rc;
+}
+
+static void
+DisablePrimarySelectionRootInit(CallbackListPtr *pcbl, void *data, void *calldata)
+{
+    ScreenPtr pScreen = calldata;
+
+    if (pScreen->myNum != 0)
+        return;
+
+    Atom prop = dixAddAtom(DISABLE_PRIMARY_SELECTION_PROP);
+    CARD8 val = noPrimarySelection ? 1 : 0;
+    dixChangeWindowProperty(serverClient, pScreen->root, prop,
+                            XA_INTEGER, 8, PropModeReplace, 1, &val, FALSE);
+}
+
+static void
+DisablePrimarySelectionPropertyFilter(CallbackListPtr *pcbl, void *data,
+                                 void *calldata)
+{
+    PropertyFilterParam *p = calldata;
+    ScreenPtr pScreen = dixGetMasterScreen();
+
+    if (!pScreen || !pScreen->root)
+        return;
+    if (p->window != pScreen->root->drawable.id)
+        return;
+    if (!(p->access_mode & DixWriteAccess))
+        return;
+
+    Atom prop = MakeAtom(DISABLE_PRIMARY_SELECTION_PROP,
+                         strlen(DISABLE_PRIMARY_SELECTION_PROP), FALSE);
+    if (prop == BAD_RESOURCE || p->property != prop)
+        return;
+    if (p->format != 8 || p->len < 1 || !p->value)
+        return;
+
+    noPrimarySelection = ((const CARD8 *) p->value)[0] != 0;
+}
+
+void
+InitSelectionProperty(void)
+{
+    /* Must be called after InitCallbackManager() so these registrations
+     * survive the DeleteCallbackManager() it performs. */
+    AddCallback(&PostInitRootWindowCallback, DisablePrimarySelectionRootInit, NULL);
+    AddCallback(&PropertyFilterCallback, DisablePrimarySelectionPropertyFilter, NULL);
 }
 
 void
