@@ -190,6 +190,7 @@ dix_main(int argc, char *argv[], char *envp[])
     dixResetRegistry();
     InitFonts();
     InitCallbackManager();
+    InitSelectionProperty();
     InitOutput(argc, argv);
 
     if (screenInfo.numScreens < 1)
