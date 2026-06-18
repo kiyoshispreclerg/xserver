@@ -378,6 +378,12 @@ ApplyXkbToggleTiming(DeviceIntPtr dev)
         LogMessageVerb(X_CONFIG, 1, "%s: locking modifiers toggle on press\n",
                        pInfo->name);
     }
+
+    if (xf86SetBoolOption(pInfo->options, "KickHotkeysOnRelease", FALSE)) {
+        xkbSwitchGroupOnRelease = TRUE;
+        LogMessageVerb(X_CONFIG, 1, "%s: group (layout) switch on release\n",
+                       pInfo->name);
+    }
 }
 
 /***********************************************************************

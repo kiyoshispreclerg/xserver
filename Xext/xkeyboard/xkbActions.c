@@ -57,6 +57,8 @@ DevPrivateKeyRec xkbDevicePrivateKeyRec;
 
 Bool xkbLockModsOnPress = FALSE;
 
+Bool xkbSwitchGroupOnRelease = FALSE;
+
 static void XkbFakePointerMotion(DeviceIntPtr dev, unsigned flags, int x,
                                  int y);
 
@@ -361,12 +363,6 @@ _XkbFilterLatchState(XkbSrvInfoPtr xkbi,
     return 1;
 }
 
-static int xkbSwitchGroupOnRelease(void)
-{
-    /* TODO: user configuring */
-    return TRUE;
-}
-
 static void xkbUpdateLockedGroup(XkbSrvInfoPtr xkbi, XkbAction* pAction)
 {
     XkbGroupAction ga = pAction->group;
@@ -386,7 +382,7 @@ _XkbFilterLockGroup(XkbSrvInfoPtr xkbi,
 
     if (filter->keycode == 0) /* initial press */
         AccessXCancelRepeatKey(xkbi, keycode);
-    if (!xkbSwitchGroupOnRelease()) {
+    if (!xkbSwitchGroupOnRelease) {
        xkbUpdateLockedGroup(xkbi, pAction);
        return sendEvent;
     }
@@ -411,7 +407,7 @@ _XkbFilterLockGroup(XkbSrvInfoPtr xkbi,
            act = XkbGetKeyAction(xkbi, &fake_state, keycode);
 
            /* KLUDGE: XkbSA_SetMods only? */
-           if (act.type == XkbSA_SetMods) { 
+           if (act.type == XkbSA_SetMods) {
                XkbFilterPtr new_filter = _XkbNextFreeFilter(xkbi);
                sendEvent = _XkbFilterSetState(xkbi,new_filter,keycode,&act);
            }
