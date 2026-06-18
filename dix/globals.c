@@ -121,4 +121,5 @@ int defaultColorVisualClass = -1;
 int monitorResolution = 0;
 
 Bool explicit_display = FALSE;
+Bool noPrimarySelection = FALSE;
 char *ConnectionInfo;

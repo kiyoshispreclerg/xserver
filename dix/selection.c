@@ -48,6 +48,8 @@ SOFTWARE.
 
 #include <stdbool.h>
 
+#include <X11/Xatom.h>
+
 #include "dix/dix_priv.h"
 #include "dix/request_priv.h"
 #include "dix/selection_priv.h"
@@ -160,6 +162,9 @@ ProcSetSelectionOwner(ClientPtr client)
     X_REQUEST_FIELD_CARD32(selection);
     X_REQUEST_FIELD_CARD32(time);
 
+    if (noPrimarySelection && stuff->selection == XA_PRIMARY)
+        return Success;
+
     WindowPtr pWin = NULL;
     TimeStamp time;
     Selection *pSel;
@@ -248,6 +253,13 @@ ProcGetSelectionOwner(ClientPtr client)
     X_REQUEST_HEAD_STRUCT(xResourceReq);
     X_REQUEST_FIELD_CARD32(id);
 
+    if (noPrimarySelection && stuff->id == XA_PRIMARY) {
+        xGetSelectionOwnerReply reply = { .owner = None };
+        if (client->swapped)
+            swapl(&reply.owner);
+        return X_SEND_REPLY_SIMPLE(client, reply);
+    }
+
     Selection *pSel;
 
     /* allow extensions to intercept */
@@ -299,6 +311,18 @@ ProcConvertSelection(ClientPtr client)
 
     REQUEST(xConvertSelectionReq);
     REQUEST_SIZE_MATCH(xConvertSelectionReq);
+
+    if (noPrimarySelection && stuff->selection == XA_PRIMARY) {
+        xEvent event = {0};
+        event.u.u.type = SelectionNotify;
+        event.u.selectionNotify.time = stuff->time;
+        event.u.selectionNotify.requestor = stuff->requestor;
+        event.u.selectionNotify.selection = stuff->selection;
+        event.u.selectionNotify.target = stuff->target;
+        event.u.selectionNotify.property = None;
+        WriteEventsToClient(client, 1, &event);
+        return Success;
+    }
 
     /* allow extensions to intercept */
     SelectionFilterParamRec param = {
