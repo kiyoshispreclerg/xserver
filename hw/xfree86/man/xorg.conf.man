@@ -692,6 +692,25 @@ Allow clients with a different byte-order than the server. Disabled by default.
 Only the first successfully probed driver is allowed to add screens to the current layout, others may
 add secondary GPU screens only (e.g., if non-primary GPUs are used for offloading).
 Disabled by default.
+.TP 7
+.BI "Option \*qDisablePrimarySelection\*q  \*q" boolean \*q
+Disable the PRIMARY selection server-wide.
+When enabled,
+.B SetSelectionOwner
+requests for the PRIMARY atom are silently ignored (so selecting text never
+claims the selection),
+.B GetSelectionOwner
+always returns
+.BR None ,
+and
+.B ConvertSelection
+responds with a
+.B SelectionNotify
+carrying
+.B property=None
+(the standard \(lqno data\(rq reply), so middle-click paste produces nothing.
+The CLIPBOARD selection (Ctrl+C/V) is unaffected.
+Disabled by default.
 .SH "MODULE SECTION"
 The
 .B Module
