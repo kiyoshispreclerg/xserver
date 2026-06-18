@@ -380,7 +380,10 @@ ApplyXkbToggleTiming(DeviceIntPtr dev)
     }
 
     if (xf86SetBoolOption(pInfo->options, "KickHotkeysOnRelease", FALSE)) {
-        xkbSwitchGroupOnRelease = TRUE;
+        CARD8 val = 1;
+        XIChangeDeviceProperty(inputInfo.keyboard,
+                               XIGetKnownProperty(XKB_PROP_KICK_HOTKEYS_ON_RELEASE),
+                               XA_INTEGER, 8, PropModeReplace, 1, &val, TRUE);
         LogMessageVerb(X_CONFIG, 1, "%s: group (layout) switch on release\n",
                        pInfo->name);
     }

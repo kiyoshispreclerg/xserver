@@ -539,6 +539,40 @@ XkbInitLockModsOnPressProperty(DeviceIntPtr dev)
     XIRegisterPropertyHandler(dev, XkbSetLockModsOnPressProperty, NULL, NULL);
 }
 
+static int
+XkbSetKickHotkeysOnReleaseProperty(DeviceIntPtr dev, Atom atom,
+                                   XIPropertyValuePtr val, BOOL checkOnly)
+{
+    int nelem = 1;
+    int v;
+    int *ptr = &v;
+
+    if (atom != XIGetKnownProperty(XKB_PROP_KICK_HOTKEYS_ON_RELEASE))
+        return Success;
+
+    if (XIPropToInt(val, &nelem, &ptr))
+        return BadValue;
+    if (v != 0 && v != 1)
+        return BadValue;
+
+    if (!checkOnly)
+        xkbSwitchGroupOnRelease = v;
+
+    return Success;
+}
+
+static void
+XkbInitKickHotkeysOnReleaseProperty(DeviceIntPtr dev)
+{
+    Atom prop = XIGetKnownProperty(XKB_PROP_KICK_HOTKEYS_ON_RELEASE);
+    CARD8 val = xkbSwitchGroupOnRelease;
+
+    XIChangeDeviceProperty(dev, prop, XA_INTEGER, 8,
+                           PropModeReplace, 1, &val, FALSE);
+    XISetDevicePropertyDeletable(dev, prop, FALSE);
+    XIRegisterPropertyHandler(dev, XkbSetKickHotkeysOnReleaseProperty, NULL, NULL);
+}
+
 static Bool
 InitKeyboardDeviceStructInternal(DeviceIntPtr dev, XkbRMLVOSet * rmlvo,
                                  const char *keymap, int keymap_length,
@@ -675,8 +709,10 @@ InitKeyboardDeviceStructInternal(DeviceIntPtr dev, XkbRMLVOSet * rmlvo,
     }
     XkbFreeRMLVOSet(&rmlvo_dflts, FALSE);
 
-    if (InputDevIsMaster(dev))
+    if (InputDevIsMaster(dev)) {
         XkbInitLockModsOnPressProperty(dev);
+        XkbInitKickHotkeysOnReleaseProperty(dev);
+    }
 
     return TRUE;
 
