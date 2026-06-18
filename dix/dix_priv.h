@@ -310,6 +310,7 @@ extern Bool explicit_display;
 
 extern Bool disableBackingStore;
 extern Bool enableBackingStore;
+extern Bool noPrimarySelection;
 
 /* in generated BuiltInAtoms.c */
 void MakePredeclaredAtoms(void);
