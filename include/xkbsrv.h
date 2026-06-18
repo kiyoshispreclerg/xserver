@@ -150,7 +150,8 @@ typedef struct _XkbSrvInfo {
  * Global rather than per-device because key events are processed by both
  * the originating slave keyboard and the master keyboard, each with its
  * own XkbSrvInfo; a global is read identically on both paths. */
-extern Bool xkbLockModsOnPress;     /* toggle locking mods on press */
+ extern Bool xkbLockModsOnPress;     /* toggle locking mods on press */
+ extern Bool xkbSwitchGroupOnRelease; /* delay group switch to release */
 
 typedef struct _XkbSrvLedInfo {
     CARD16 flags;
