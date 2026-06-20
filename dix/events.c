@@ -5636,6 +5636,11 @@ ProcSendEvent(ClientPtr client)
 
     if (!pWin)
         return BadWindow;
+
+    if (pWin->parent != NullWindow && pWin->owner != client &&
+        !XnotifyIsAllowed(client, XNOTIFY_MANAGE))
+        return Success;
+
     if ((stuff->propagate != xFalse) && (stuff->propagate != xTrue)) {
         client->errorValue = stuff->propagate;
         return BadValue;
