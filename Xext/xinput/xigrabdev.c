@@ -45,11 +45,14 @@
 #include "inputstr.h"           /* DeviceIntPtr      */
 #include "windowstr.h"          /* window structure  */
 #include "exglobals.h"          /* BadDevice */
+#include "Xext/xnotify/xnotify.h"
 
 int
 ProcXIGrabDevice(ClientPtr client)
 {
     X_REQUEST_HEAD_AT_LEAST(xXIGrabDeviceReq);
+    if (!XnotifyIsAllowed(client, XNOTIFY_INPUT_GRAB))
+        return BadAccess;
     X_REQUEST_FIELD_CARD16(deviceid);
     X_REQUEST_FIELD_CARD32(grab_window);
     X_REQUEST_FIELD_CARD32(cursor);
@@ -129,6 +132,8 @@ ProcXIUngrabDevice(ClientPtr client)
     X_REQUEST_HEAD_STRUCT(xXIUngrabDeviceReq);
     X_REQUEST_FIELD_CARD16(deviceid);
     X_REQUEST_FIELD_CARD32(time);
+    if (!XnotifyIsAllowed(client, XNOTIFY_INPUT_GRAB))
+        return BadAccess;
 
     DeviceIntPtr dev;
     GrabPtr grab;
