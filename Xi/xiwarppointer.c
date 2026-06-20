@@ -45,6 +45,7 @@
 #include "inputstr.h"           /* DeviceIntPtr      */
 #include "windowstr.h"          /* window structure  */
 #include "scrnintstr.h"         /* screen structure  */
+#include "Xext/xnotify/xnotify.h"
 #include "extnsionst.h"
 #include "exevents.h"
 #include "exglobals.h"
@@ -60,6 +61,8 @@ int
 ProcXIWarpPointer(ClientPtr client)
 {
     REQUEST(xXIWarpPointerReq);
+    if (!XnotifyIsAllowed(client, XNOTIFY_WARP))
+        return Success;
     REQUEST_SIZE_MATCH(xXIWarpPointerReq);
 
     if (client->swapped) {
