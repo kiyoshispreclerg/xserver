@@ -771,6 +771,13 @@ ProcCreateWindow(ClientPtr client)
     if (Ones(stuff->mask) != len)
         return BadLength;
 
+    if (stuff->mask & CWOverrideRedirect) {
+        XID *vals = (XID *)(&stuff[1]);
+        int ov_slot = Ones(stuff->mask & (CWOverrideRedirect - 1));
+        if (vals[ov_slot] != 0 && !XnotifyIsAllowed(client, XNOTIFY_OVERLAY))
+            vals[ov_slot] = 0;
+    }
+
     return DoCreateWindowReq(client, stuff, (XID*)&stuff[1]);
 }
 
@@ -789,6 +796,14 @@ ProcChangeWindowAttributes(ClientPtr client)
     int len = client->req_len - bytes_to_int32(sizeof(xChangeWindowAttributesReq));
     if (len != Ones(stuff->valueMask))
         return BadLength;
+
+    if (stuff->valueMask & CWOverrideRedirect) {
+        XID *vals = (XID *)(&stuff[1]);
+        int ov_slot = Ones(stuff->valueMask & (CWOverrideRedirect - 1));
+        if (vals[ov_slot] != 0 && !XnotifyIsAllowed(client, XNOTIFY_OVERLAY))
+            vals[ov_slot] = 0;
+    }
+
     return ChangeWindowAttributes(pWin,
                                   stuff->valueMask, (XID *) &stuff[1], client);
 }
