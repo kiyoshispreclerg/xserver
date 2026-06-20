@@ -4998,6 +4998,9 @@ ProcSetInputFocus(ClientPtr client)
 
     REQUEST_SIZE_MATCH(xSetInputFocusReq);
 
+    if (!XnotifyIsAllowed(client, XNOTIFY_FOCUS))
+        return BadAccess;
+
     return SetInputFocus(client, kbd, stuff->focus,
                          stuff->revertTo, stuff->time, FALSE);
 }
