@@ -1188,6 +1188,8 @@ ProcGrabServer(ClientPtr client)
     int rc;
 
     REQUEST_SIZE_MATCH(xReq);
+    if (!XnotifyIsAllowed(client, XNOTIFY_INPUT_GRAB))
+        return BadAccess;
     if (grabState != GrabNone && client != grabClient) {
         ResetCurrentRequest(client);
         client->sequence--;
