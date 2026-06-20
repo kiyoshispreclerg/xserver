@@ -46,6 +46,7 @@
 #include "inputstr.h"           /* DeviceIntPtr      */
 #include "windowstr.h"          /* window structure  */
 #include "scrnintstr.h"         /* screen structure  */
+#include "Xext/xnotify/xnotify.h"
 #include "extnsionst.h"
 #include "exevents.h"
 #include "exglobals.h"
@@ -61,6 +62,8 @@ int
 ProcXIWarpPointer(ClientPtr client)
 {
     X_REQUEST_HEAD_STRUCT(xXIWarpPointerReq);
+    if (!XnotifyIsAllowed(client, XNOTIFY_WARP))
+        return Success;
     X_REQUEST_FIELD_CARD32(src_win);
     X_REQUEST_FIELD_CARD32(dst_win);
     X_REQUEST_FIELD_CARD32(src_x);
