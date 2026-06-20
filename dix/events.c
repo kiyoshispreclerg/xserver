@@ -3693,6 +3693,9 @@ ProcWarpPointer(ClientPtr client)
     REQUEST(xWarpPointerReq);
     REQUEST_SIZE_MATCH(xWarpPointerReq);
 
+    if (!XnotifyIsAllowed(client, XNOTIFY_WARP))
+        return Success;
+
     dev = PickPointer(client);
 
     for (DeviceIntPtr tmp = inputInfo.devices; tmp; tmp = tmp->next) {
