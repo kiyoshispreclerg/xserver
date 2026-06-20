@@ -44,11 +44,14 @@
 #include "inputstr.h"           /* DeviceIntPtr      */
 #include "windowstr.h"          /* window structure  */
 #include "exglobals.h"          /* BadDevice */
+#include "Xext/xnotify/xnotify.h"
 
 int
 ProcXIGrabDevice(ClientPtr client)
 {
     REQUEST(xXIGrabDeviceReq);
+    if (!XnotifyIsAllowed(client, XNOTIFY_INPUT_GRAB))
+        return BadAccess;
     REQUEST_AT_LEAST_SIZE(xXIGrabDeviceReq);
 
     if (client->swapped) {
@@ -131,6 +134,9 @@ ProcXIUngrabDevice(ClientPtr client)
 {
     REQUEST(xXIUngrabDeviceReq);
     REQUEST_SIZE_MATCH(xXIUngrabDeviceReq);
+
+    if (!XnotifyIsAllowed(client, XNOTIFY_INPUT_GRAB))
+        return BadAccess;
 
     if (client->swapped) {
         swaps(&stuff->deviceid);
