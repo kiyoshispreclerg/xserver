@@ -29,6 +29,7 @@
 #include "dix/request_priv.h"
 #include "Xext/randr/randrstr_priv.h"
 #include "Xext/randr/rrdispatch_priv.h"
+#include "Xext/xnotify/xnotify.h"
 
 RESTYPE RROutputType;
 
@@ -565,6 +566,9 @@ ProcRRSetOutputPrimary(ClientPtr client)
 {
     REQUEST(xRRSetOutputPrimaryReq);
     REQUEST_SIZE_MATCH(xRRSetOutputPrimaryReq);
+
+    if (!XnotifyIsAllowed(client, XNOTIFY_RANDR))
+        return BadAccess;
 
     if (client->swapped) {
         swapl(&stuff->window);
