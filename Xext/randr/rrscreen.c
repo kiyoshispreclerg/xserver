@@ -28,6 +28,7 @@
 #include "dix/server_priv.h"
 #include "Xext/randr/randrstr_priv.h"
 #include "Xext/randr/rrdispatch_priv.h"
+#include "Xext/xnotify/xnotify.h"
 
 static CARD16
  RR10CurrentSizeID(ScreenPtr pScreen);
@@ -861,6 +862,9 @@ int
 ProcRRSetScreenConfig(ClientPtr client)
 {
     REQUEST(xRRSetScreenConfigReq);
+
+    if (!XnotifyIsAllowed(client, XNOTIFY_RANDR))
+        return BadAccess;
 
     int rate = 0;
     if (RRClientKnowsRates(client)) {

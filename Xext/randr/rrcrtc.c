@@ -33,6 +33,7 @@
 #include "os/osdep.h"
 #include "Xext/randr/randrstr_priv.h"
 #include "Xext/randr/rrdispatch_priv.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "swaprep.h"
 #include "mipointer.h"
@@ -1242,6 +1243,9 @@ ProcRRSetCrtcConfig(ClientPtr client)
 {
     REQUEST(xRRSetCrtcConfigReq);
     REQUEST_AT_LEAST_SIZE(xRRSetCrtcConfigReq);
+
+    if (!XnotifyIsAllowed(client, XNOTIFY_RANDR))
+        return BadAccess;
 
     if (client->swapped) {
         swapl(&stuff->crtc);
