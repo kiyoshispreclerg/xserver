@@ -45,7 +45,7 @@ void GlxPushProvider(__GLXprovider * provider);
 
 /**
  * @brief xorgGlxCreateVendor adds default glx vendor callback
- * @warning this function need to be called once, because it installs `catch-all` style which always succeed
+ * @note idempotent: the `catch-all` callback is installed at most once
  */
 void xorgGlxCreateVendor(void);
 

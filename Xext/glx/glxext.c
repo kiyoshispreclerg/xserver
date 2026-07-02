@@ -555,7 +555,14 @@ xorgGlxServerInit(CallbackListPtr *pcbl, void *param, void *ext)
 
 void xorgGlxCreateVendor(void)
 {
-    AddCallback(glxServer.extensionInitCallback, xorgGlxServerInit, NULL);
+    /* Called from both the Xorg glx module and glamor_egl; install once. */
+    static Bool registered = FALSE;
+
+    if (registered)
+        return;
+
+    if (AddCallback(glxServer.extensionInitCallback, xorgGlxServerInit, NULL))
+        registered = TRUE;
 }
 
 /************************************************************************/
