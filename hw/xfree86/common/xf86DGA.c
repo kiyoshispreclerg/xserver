@@ -1717,6 +1717,8 @@ ProcXDGACreateColormap(ClientPtr client)
  *
  */
 
+static Bool DGAAllowNonLocal = FALSE;
+
 #ifdef DGA_PROTOCOL_OLD_SUPPORT
 
 static int
@@ -1729,6 +1731,9 @@ ProcXF86DGAGetVideoLL(ClientPtr client)
     char *name;
 
     REQUEST_SIZE_MATCH(xXF86DGAGetVideoLLReq);
+
+    if (!DGAAllowNonLocal && !client->local)
+        return BadAccess;
 
     if (stuff->screen >= screenInfo.numScreens)
         return BadValue;
@@ -1770,6 +1775,9 @@ ProcXF86DGADirectVideo(ClientPtr client)
     REQUEST(xXF86DGADirectVideoReq);
 
     REQUEST_SIZE_MATCH(xXF86DGADirectVideoReq);
+
+    if (!DGAAllowNonLocal && !client->local)
+        return BadAccess;
 
     if (stuff->screen >= screenInfo.numScreens)
         return BadValue;
