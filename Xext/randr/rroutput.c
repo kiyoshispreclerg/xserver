@@ -324,6 +324,7 @@ RROutputSetPhysicalSize(RROutputPtr output, int mmWidth, int mmHeight)
     output->mmWidth = mmWidth;
     output->mmHeight = mmHeight;
     RROutputChanged(output, FALSE);
+    RROutputUpdateComputedDpi(output);
     return TRUE;
 }
 
