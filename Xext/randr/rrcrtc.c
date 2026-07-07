@@ -235,6 +235,17 @@ RRCrtcNotify(RRCrtcPtr crtc,
                            &crtc->transform, &crtc->f_transform,
                            &crtc->f_inverse);
     }
+
+    /*
+     * The crtc's mode (pixel resolution) and/or its set of outputs may
+     * have just changed; re-derive the "DPI" property for every output
+     * now driven by this crtc from its (already known, if any) physical
+     * size and this mode. No-op per output until both are known, or once
+     * the user has explicitly overridden the value.
+     */
+    for (i = 0; i < crtc->numOutputs; i++)
+        RROutputUpdateComputedDpi(crtc->outputs[i]);
+
     return TRUE;
 }
 
