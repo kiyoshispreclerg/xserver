@@ -327,6 +327,57 @@ RROutputSetPhysicalSize(RROutputPtr output, int mmWidth, int mmHeight)
     return TRUE;
 }
 
+/*
+ * Derives DPI from the output's physical size (usually reported via EDID,
+ * see RROutputSetPhysicalSize) and the resolution of its active mode:
+ *
+ *     dpi = pixels * 25.4 / millimeters
+ *
+ * averaged across the horizontal and vertical axes. Both physical size and
+ * an active mode are required, so this is a no-op immediately after
+ * RROutputCreate() (which seeds the property with monitorResolution/96 as
+ * a placeholder) and only takes effect once the driver has probed EDID and
+ * a CRTC has actually been configured with a mode -- whichever of the two
+ * hooks (RROutputSetPhysicalSize / RRCrtcNotify) runs last for this output.
+ *
+ * Opt-in via rrAutoComputeDPI (off by default -- see "AutoDPI" ServerFlags
+ * option in xf86Config.c), so the historical monitorResolution/96 behavior
+ * is preserved unless explicitly requested.
+ *
+ * Never overwrites a value the user picked explicitly (xrandr --set DPI),
+ * tracked via output->dpiUserSet, set from ProcRRChangeOutputProperty.
+ */
+void
+RROutputUpdateComputedDpi(RROutputPtr output)
+{
+    if (!rrAutoComputeDPI)
+        return;
+
+    if (output->dpiUserSet)
+        return;
+
+    if (!output->crtc || !output->crtc->mode)
+        return;
+
+    if (output->mmWidth <= 0 || output->mmHeight <= 0)
+        return;
+
+    xRRModeInfo *mode = &output->crtc->mode->mode;
+    double dpiX = (double) mode->width * 25.4 / output->mmWidth;
+    double dpiY = (double) mode->height * 25.4 / output->mmHeight;
+    INT32 dpi = (INT32) ((dpiX + dpiY) / 2.0 + 0.5);
+
+    if (dpi < 1)
+        return;
+
+    Atom dpiAtom = dixAddAtom("DPI");
+    if (dpiAtom == BAD_RESOURCE)
+        return;
+
+    (void) RRChangeOutputProperty(output, dpiAtom, XA_INTEGER, 32,
+                                  PropModeReplace, 1, &dpi, FALSE, FALSE);
+}
+
 Bool
 RROutputSetNonDesktop(RROutputPtr output, Bool nonDesktop)
 {
