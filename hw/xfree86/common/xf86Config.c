@@ -668,6 +668,7 @@ typedef enum {
     FLAG_ALLOW_BYTE_SWAPPED_CLIENTS,
     FLAG_SINGLE_DRIVER,
     FLAG_FONTSERVER,
+    FLAG_AUTO_DPI,
     FLAG_DISABLE_PRIMARY_SELECTION,
     FLAG_DRI3_VERSION_FROM_FIRST_SCREEN,
 } FlagValues;
@@ -737,6 +738,8 @@ static OptionInfoRec FlagOptions[] = {
      {0}, FALSE},
     {FLAG_FONTSERVER, "FontServerConnections", OPTV_BOOLEAN,
      {0}, FALSE},
+    {FLAG_AUTO_DPI, "AutoDPI", OPTV_BOOLEAN,
+     {0}, FALSE},
     {FLAG_DISABLE_PRIMARY_SELECTION, "DisablePrimarySelection", OPTV_BOOLEAN,
      {0}, FALSE},
     {FLAG_DRI3_VERSION_FROM_FIRST_SCREEN, "DRI3VersionFromFirstScreen", OPTV_BOOLEAN,
@@ -784,6 +787,13 @@ configServerFlags(XF86ConfFlagsPtr flagsconf, XF86OptionPtr layoutopts)
     xf86GetOptValBool(FlagOptions, FLAG_IGNORE_ABI, &xf86Info.ignoreABI);
     if (xf86Info.ignoreABI) {
         LogMessageVerb(X_CONFIG, 1, "Ignoring ABI Version\n");
+    }
+
+    xf86GetOptValBool(FlagOptions, FLAG_AUTO_DPI, &rrAutoComputeDPI);
+    if (rrAutoComputeDPI) {
+        LogMessageVerb(X_CONFIG, 1,
+                       "AutoDPI: computing per-output DPI from EDID "
+                       "physical size and active mode\n");
     }
 
     Bool bv = FALSE;
