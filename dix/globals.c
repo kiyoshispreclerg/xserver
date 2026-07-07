@@ -121,6 +121,7 @@ TimeStamp currentTime;
 int defaultColorVisualClass = -1;
 int monitorResolution = 0;
 bool autosetDPI = false;
+Bool rrAutoComputeDPI = FALSE;
 
 Bool explicit_display = FALSE;
 Bool noPrimarySelection = FALSE;
