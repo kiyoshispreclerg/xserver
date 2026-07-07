@@ -151,6 +151,9 @@ struct _rrOutput {
     RRPropertyPtr properties;
     Bool pendingProperties;
     void *devPrivate;
+    Bool dpiUserSet;   /* TRUE once a client (e.g. xrandr --set DPI) has
+                        * explicitly written the "DPI" output property;
+                        * suppresses further EDID/mode-based auto-recompute. */
 };
 
 struct _rrProvider {
@@ -631,6 +634,16 @@ extern _X_EXPORT Bool
 
 extern _X_EXPORT Bool
  RROutputSetPhysicalSize(RROutputPtr output, int mmWidth, int mmHeight);
+
+/*
+ * (Re)computes the "DPI" output property from the output's physical size
+ * (RROutputSetPhysicalSize, usually from EDID) and its active CRTC mode,
+ * and applies it via RRChangeOutputProperty. A no-op until both pieces of
+ * information are known, and once the user has explicitly set the
+ * property (output->dpiUserSet).
+ */
+extern _X_EXPORT void
+ RROutputUpdateComputedDpi(RROutputPtr output);
 
 extern _X_EXPORT void
  RROutputDestroy(RROutputPtr output);
