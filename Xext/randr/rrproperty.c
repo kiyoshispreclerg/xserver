@@ -575,8 +575,16 @@ ProcRRChangeOutputProperty(ClientPtr client)
                                  TRUE);
     if (err != Success)
         return err;
-    else
-        return Success;
+
+    /*
+     * Track explicit client-issued changes to the "DPI" property (e.g.
+     * `xrandr --set DPI ...`) so RROutputUpdateComputedDpi() never
+     * silently overwrites a value the user picked on purpose.
+     */
+    if (stuff->property == dixAddAtom("DPI"))
+        output->dpiUserSet = TRUE;
+
+    return Success;
 }
 
 int
