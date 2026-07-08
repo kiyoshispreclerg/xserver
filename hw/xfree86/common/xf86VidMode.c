@@ -51,6 +51,7 @@
 #include "xf86Privstr.h"
 #include "xf86Extensions.h"
 #include "xf86cmap.h"
+#include "xf86Crtc.h"
 
 static vidMonitorValue
 xf86VidModeGetMonitorValue(ScreenPtr pScreen, int valtyp, int indx)
@@ -247,11 +248,36 @@ xf86VidModeGetViewPort(ScreenPtr pScreen, int *x, int *y)
 static Bool
 xf86VidModeSwitchMode(ScreenPtr pScreen, DisplayModePtr mode)
 {
-    ScrnInfoPtr pScrn;
+    ScrnInfoPtr pScrn = xf86ScreenToScrn(pScreen);
+    xf86OutputPtr compat_output;
+    xf86CrtcPtr crtc;
     DisplayModePtr pTmpMode;
     bool retval;
 
-    pScrn = xf86ScreenToScrn(pScreen);
+    /*
+     * On xf86Crtc drivers the legacy path (xf86SwitchMode -> xf86SetSingleMode)
+     * collapses every CRTC onto a single mirrored mode, which destroys a
+     * multi-monitor layout and clobbers each CRTC's RandR desiredMode.  To keep
+     * the user's monitor arrangement intact, retarget only the compatibility
+     * (primary) output's CRTC and leave the other CRTCs untouched.  We don't
+     * touch desiredMode, so the RandR/xrandr configuration is fully preserved
+     * and a plain "xrandr" restores the primary if a client exits uncleanly.
+     */
+    compat_output = xf86CompatOutput(pScrn);
+    crtc = xf86CompatCrtc(pScrn);
+    if (compat_output && crtc && crtc->enabled) {
+        DisplayModePtr crtc_mode = xf86OutputFindClosestMode(compat_output, mode);
+
+        if (!crtc_mode)
+            return FALSE;
+        if (!xf86CrtcSetModeTransform(crtc, crtc_mode, crtc->rotation, NULL,
+                                      crtc->x, crtc->y))
+            return FALSE;
+        pScrn->currentMode = mode;
+        return TRUE;
+    }
+
+    /* Legacy (non-xf86Crtc) drivers: fall back to the single-head switch. */
     /* save in case we fail */
     pTmpMode = pScrn->currentMode;
     /* Force a mode switch */
