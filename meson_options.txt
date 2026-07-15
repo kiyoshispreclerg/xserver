@@ -101,6 +101,8 @@ option('xselinux', type: 'combo', choices: ['true', 'false', 'auto'], value: 'au
        description: 'XSELINUX extension')
 option('namespace', type: 'boolean', value: true,
        description: 'Container/namespace extension')
+option('input_scale', type: 'boolean', value: true,
+       description: 'X-INPUT-SCALE (per-CRTC cursor confinement for HiDPI compositors) extension')
 option('xinerama', type: 'boolean', value: true,
        description: 'Xinerama extension')
 option('xcsecurity', type: 'boolean', value: false,
