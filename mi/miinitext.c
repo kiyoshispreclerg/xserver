@@ -117,6 +117,9 @@ static const ExtensionModule staticExtensions[] = {
 #ifdef CONFIG_NAMESPACE
     {NamespaceExtensionInit, "NAMESPACE", &noNamespaceExtension},
 #endif
+#ifdef CONFIG_INPUT_SCALE
+    {XInputScaleExtensionInit, "X-INPUT-SCALE", &noXInputScaleExtension},
+#endif
 #ifdef XINERAMA
     {PanoramiXExtensionInit, "XINERAMA", &noPanoramiXExtension},
 #endif /* XINERAMA */
