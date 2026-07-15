@@ -21,6 +21,17 @@ The XLibre Xserver is the community-managed display server for the [X Window Sys
 To learn more about the features and mission of XLibre, please [visit our homepage](https://xlibre.net).
 
 
+## This Fork: XiS
+
+This is a soft fork of XLibre named **XiS**, adding a small set of features on top of upstream. It stays fully compatible with XLibre/X11 — nothing here changes the protocol or default behavior unless explicitly configured.
+
+* **[Xnotify](doc/Xnotify.md)** for static or dynamic permission rules.
+* **`DisablePrimarySelection`** `ServerFlags` option to turn off the X11 PRIMARY selection.
+* **`KickHotkeysOnRelease`** and **`ToggleModifiersOnPress`** XKB input options, fixing some old small annoyances.
+
+And more. See the commit history for details on every change.
+
+
 ## Switching to XLibre
 
 The easiest way to install and run XLibre is to use your distribution's provided packages. Please see the [Are We XLibre Yet? - (X11Libre/xserver Wiki)](https://github.com/X11Libre/xserver/wiki/Are-We-XLibre-Yet%3F) page for a list of the available options. If there is no option, then go on with building and installing XLibre from source.
