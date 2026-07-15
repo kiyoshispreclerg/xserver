@@ -32,6 +32,7 @@ extern Bool noTestExtensions;
 extern Bool noXFixesExtension;
 extern Bool noNamespaceExtension;
 extern Bool noXnotifyExtension;
+extern Bool noXInputScaleExtension;
 
 extern Bool PanoramiXExtensionDisabledHack;
 
@@ -69,5 +70,6 @@ void PseudoramiXExtensionInit(void);
 void present_extension_init(void);
 void NamespaceExtensionInit(void);
 void XnotifyExtensionInit(void);
+void XInputScaleExtensionInit(void);
 
 #endif /* _XSERVER_EXTINIT_PRIV_H */

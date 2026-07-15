@@ -125,6 +125,14 @@ struct _rrCrtc {
 
     PixmapPtr scanout_pixmap;
     PixmapPtr scanout_pixmap_back;
+
+    /* X-INPUT-SCALE extension: compositor-declared cursor confinement box
+     * (desktop-space coordinates, must lie within this CRTC's physical
+     * scanout box), independent of any RandR transform. See
+     * Xext/inputscale/inputscale.c. */
+    Bool confine_active;
+    ClientPtr confine_client;
+    BoxRec confine_box;
 };
 
 struct _rrOutput {
