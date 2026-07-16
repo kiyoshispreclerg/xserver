@@ -72,6 +72,9 @@ in this Software without prior written authorization from The Open Group.
 #include   "dixstruct.h"
 #include   "inputstr.h"
 #include   "eventstr.h"
+#ifdef CONFIG_INPUT_SCALE
+#include   "include/inputscale.h"
+#endif
 
 typedef struct {
     ScreenPtr pScreen;          /* current screen */
@@ -457,6 +460,22 @@ miPointerUpdateSprite(DeviceIntPtr pDev)
     devx = pPointer->devx;
     devy = pPointer->devy;
 
+    /* hwx/hwy: where the sprite is actually drawn/positioned. Equal to x/y
+     * on a stock setup. When X-INPUT-SCALE has confined this screen's
+     * pointer to a sub-rectangle of a CRTC's logical coordinate range (see
+     * Xext/inputscale/inputscale.c), x/y stay in that logical range - which
+     * is correct for hit-testing/reporting - but a hardware cursor plane is
+     * positioned in *physical* scanout coordinates by the driver below this,
+     * so it needs the corresponding physical-space point instead, or it
+     * visibly points at the wrong place on screen. This only ever affects
+     * where the sprite is drawn, never pPointer->devx/devy (which must stay
+     * logical - they're compared against pPointer->x/y, also logical, to
+     * decide whether anything moved at all). */
+    int hwx = x, hwy = y;
+#ifdef CONFIG_INPUT_SCALE
+    XInputScaleLogicalToPhysicalCursor(pScreen, &hwx, &hwy);
+#endif
+
     pScreenPriv = GetScreenPrivate(pScreen);
     /*
      * if the cursor has switched screens, disable the sprite
@@ -476,7 +495,7 @@ miPointerUpdateSprite(DeviceIntPtr pDev)
         }
         (*pScreenPriv->screenFuncs->CrossScreen) (pScreen, TRUE);
         (*pScreenPriv->spriteFuncs->SetCursor)
-            (pDev, pScreen, pPointer->pCursor, x, y);
+            (pDev, pScreen, pPointer->pCursor, hwx, hwy);
         pPointer->devx = x;
         pPointer->devy = y;
         pPointer->pSpriteCursor = pPointer->pCursor;
@@ -490,7 +509,7 @@ miPointerUpdateSprite(DeviceIntPtr pDev)
         if (!pCursor ||
             (pCursor->bits->emptyMask && !pScreenPriv->showTransparent))
             pCursor = NullCursor;
-        (*pScreenPriv->spriteFuncs->SetCursor) (pDev, pScreen, pCursor, x, y);
+        (*pScreenPriv->spriteFuncs->SetCursor) (pDev, pScreen, pCursor, hwx, hwy);
 
         pPointer->devx = x;
         pPointer->devy = y;
@@ -500,7 +519,7 @@ miPointerUpdateSprite(DeviceIntPtr pDev)
         pPointer->devx = x;
         pPointer->devy = y;
         if (pPointer->pCursor && !pPointer->pCursor->bits->emptyMask)
-            (*pScreenPriv->spriteFuncs->MoveCursor) (pDev, pScreen, x, y);
+            (*pScreenPriv->spriteFuncs->MoveCursor) (pDev, pScreen, hwx, hwy);
     }
 }
 
@@ -595,8 +614,20 @@ miPointerMoveNoEvent(DeviceIntPtr pDev, ScreenPtr pScreen, int x, int y)
         &&!pScreenPriv->waitForUpdate && pScreen == pPointer->pSpriteScreen) {
         pPointer->devx = x;
         pPointer->devy = y;
-        if (pPointer->pCursor && !pPointer->pCursor->bits->emptyMask)
-            (*pScreenPriv->spriteFuncs->MoveCursor) (pDev, pScreen, x, y);
+        if (pPointer->pCursor && !pPointer->pCursor->bits->emptyMask) {
+            /* hwx/hwy: see the matching comment in miPointerUpdateSprite().
+             * This is the "silken mouse" immediate-update path - it runs on
+             * every motion event, ahead of the normal sprite update cycle,
+             * which is exactly why it needs the same logical->physical
+             * mapping: without it, the cursor visibly flashes at the
+             * unscaled position on every move before the later, corrected
+             * update catches up. */
+            int hwx = x, hwy = y;
+#ifdef CONFIG_INPUT_SCALE
+            XInputScaleLogicalToPhysicalCursor(pScreen, &hwx, &hwy);
+#endif
+            (*pScreenPriv->spriteFuncs->MoveCursor) (pDev, pScreen, hwx, hwy);
+        }
     }
 
     pPointer->x = x;
