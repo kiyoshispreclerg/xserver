@@ -32,6 +32,9 @@
 #include <X11/extensions/dpmsconst.h>
 
 #include "include/xf86DDC.h"
+#ifdef CONFIG_INPUT_SCALE
+#include "include/inputscale.h"
+#endif
 
 #include "xf86.h"
 #include "xf86Crtc.h"
@@ -605,11 +608,30 @@ xf86_crtc_load_cursor_argb(xf86CrtcPtr crtc, CursorPtr cursor)
     int image_width = cursor_info->MaxWidth;
     int image_height = cursor_info->MaxHeight;
     const Rotation rotation = xf86_crtc_cursor_rotation(crtc);
+#ifdef CONFIG_INPUT_SCALE
+    /* X-INPUT-SCALE: on a confined CRTC, upscale the glyph (nearest
+     * neighbor) into the fixed-size hardware cursor buffer instead of
+     * placing it 1:1, so the on-screen cursor matches the panel's physical
+     * pixel density instead of looking undersized. Blockier than a "real"
+     * hardware cursor at that density would be - an accepted latency/
+     * sharpness tradeoff, see doc/x11-per-output-scaling-extension.md. If
+     * the scaled glyph would exceed the buffer, it's simply clipped (no
+     * fallback to software cursor for this case yet). */
+    double scale_x = 1.0, scale_y = 1.0;
+    Bool scaled = crtc->randr_crtc &&
+                  XInputScaleGetCrtcScale(crtc->randr_crtc, &scale_x, &scale_y);
+#endif
 
     for (y = 0; y < image_height; y++)
         for (x = 0; x < image_width; x++) {
             xf86_crtc_rotate_coord(rotation, image_width, image_height, x, y,
                                    &xin, &yin);
+#ifdef CONFIG_INPUT_SCALE
+            if (scaled) {
+                xin = (int) (xin / scale_x);
+                yin = (int) (yin / scale_y);
+            }
+#endif
             if (xin < source_width && yin < source_height)
                 bits = cursor_source[yin * source_width + xin];
             else

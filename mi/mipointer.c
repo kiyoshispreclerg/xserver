@@ -473,7 +473,12 @@ miPointerUpdateSprite(DeviceIntPtr pDev)
      * decide whether anything moved at all). */
     int hwx = x, hwy = y;
 #ifdef CONFIG_INPUT_SCALE
-    XInputScaleLogicalToPhysicalCursor(pScreen, &hwx, &hwy);
+    {
+        int hotx = pPointer->pCursor ? pPointer->pCursor->bits->xhot : 0;
+        int hoty = pPointer->pCursor ? pPointer->pCursor->bits->yhot : 0;
+
+        XInputScaleLogicalToPhysicalCursor(pScreen, hotx, hoty, &hwx, &hwy);
+    }
 #endif
 
     pScreenPriv = GetScreenPrivate(pScreen);
@@ -624,7 +629,10 @@ miPointerMoveNoEvent(DeviceIntPtr pDev, ScreenPtr pScreen, int x, int y)
              * update catches up. */
             int hwx = x, hwy = y;
 #ifdef CONFIG_INPUT_SCALE
-            XInputScaleLogicalToPhysicalCursor(pScreen, &hwx, &hwy);
+            XInputScaleLogicalToPhysicalCursor(pScreen,
+                                               pPointer->pCursor->bits->xhot,
+                                               pPointer->pCursor->bits->yhot,
+                                               &hwx, &hwy);
 #endif
             (*pScreenPriv->spriteFuncs->MoveCursor) (pDev, pScreen, hwx, hwy);
         }
