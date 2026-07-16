@@ -32,6 +32,7 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <errno.h>
+#include <math.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -40,6 +41,9 @@
 #include "os/fmt.h"
 #include "os/mathx_priv.h"
 #include "Xext/present/present_priv.h"
+#ifdef CONFIG_INPUT_SCALE
+#include "include/inputscale.h"
+#endif
 
 #include "inputstr.h"
 #include "xf86str.h"
@@ -1980,6 +1984,26 @@ drmmode_load_cursor_argb_check(xf86CrtcPtr crtc, CARD32 *image)
     const Rotation rotation = crtc->rotation;
     int glyph_width = cursor->bits->width;
     int glyph_height = cursor->bits->height;
+
+#ifdef CONFIG_INPUT_SCALE
+    /* X-INPUT-SCALE already resampled the glyph into a larger area of the
+     * working cursor_image buffer (hw/xfree86/modes/xf86Cursors.c,
+     * xf86_crtc_load_cursor_argb()) when this CRTC is confined - glyph_width/
+     * height must reflect that scaled size here too, or the crop/hw-size
+     * selection below is computed against the *original*, smaller glyph
+     * size and clips the already-painted, larger content right back down to
+     * it. */
+    {
+        double xis_sx = 1.0, xis_sy = 1.0;
+
+        if (crtc->randr_crtc &&
+            XInputScaleGetCrtcScale(crtc->randr_crtc, &xis_sx, &xis_sy)) {
+            glyph_width = (int) lround(glyph_width * xis_sx);
+            glyph_height = (int) lround(glyph_height * xis_sy);
+        }
+    }
+#endif
+
     int crop_width = glyph_width;
     int crop_height = glyph_height;
 
