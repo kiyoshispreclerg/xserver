@@ -127,8 +127,30 @@ xis_box_contains_box(const BoxRec *outer, const BoxRec *inner)
  *  miPointerUpdateSprite()), never to any reported/hit-test coordinate.
  * ------------------------------------------------------------------ */
 
+Bool
+XInputScaleGetCrtcScale(RRCrtcPtr crtc, double *sx, double *sy)
+{
+    BoxRec physical;
+    int confine_w, confine_h;
+
+    if (!crtc->confine_active)
+        return FALSE;
+    if (!xis_crtc_box(&physical, crtc))
+        return FALSE;
+
+    confine_w = crtc->confine_box.x2 - crtc->confine_box.x1;
+    confine_h = crtc->confine_box.y2 - crtc->confine_box.y1;
+    if (confine_w <= 0 || confine_h <= 0)
+        return FALSE;
+
+    *sx = (double) (physical.x2 - physical.x1) / confine_w;
+    *sy = (double) (physical.y2 - physical.y1) / confine_h;
+    return TRUE;
+}
+
 void
-XInputScaleLogicalToPhysicalCursor(ScreenPtr pScreen, int *x, int *y)
+XInputScaleLogicalToPhysicalCursor(ScreenPtr pScreen, int hotx, int hoty,
+                                   int *x, int *y)
 {
     rrScrPrivPtr pScrPriv;
 
@@ -142,27 +164,26 @@ XInputScaleLogicalToPhysicalCursor(ScreenPtr pScreen, int *x, int *y)
     for (int i = 0; i < pScrPriv->numCrtcs; i++) {
         RRCrtcPtr crtc = pScrPriv->crtcs[i];
         BoxRec physical;
-        int confine_w, confine_h, physical_w, physical_h;
+        double sx, sy;
 
         if (!crtc->confine_active)
             continue;
         if (!xis_box_contains(&crtc->confine_box, *x, *y))
             continue;
+        if (!XInputScaleGetCrtcScale(crtc, &sx, &sy))
+            continue;
         if (!xis_crtc_box(&physical, crtc))
             continue;
 
-        confine_w = crtc->confine_box.x2 - crtc->confine_box.x1;
-        confine_h = crtc->confine_box.y2 - crtc->confine_box.y1;
-        physical_w = physical.x2 - physical.x1;
-        physical_h = physical.y2 - physical.y1;
-
-        if (confine_w <= 0 || confine_h <= 0)
-            return;
-
-        *x = physical.x1 + (int) lround((double) (*x - crtc->confine_box.x1)
-                                        * physical_w / confine_w);
-        *y = physical.y1 + (int) lround((double) (*y - crtc->confine_box.y1)
-                                        * physical_h / confine_h);
+        /* Position the visually-scaled hotspot pixel where the pointer tip
+         * actually is, not the unscaled one - see the comment on this
+         * function's declaration in include/inputscale.h. */
+        *x = physical.x1
+             + (int) lround((double) (*x - crtc->confine_box.x1) * sx)
+             - (int) lround(hotx * (sx - 1));
+        *y = physical.y1
+             + (int) lround((double) (*y - crtc->confine_box.y1) * sy)
+             - (int) lround(hoty * (sy - 1));
         return;
     }
 }

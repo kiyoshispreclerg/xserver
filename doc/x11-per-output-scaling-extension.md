@@ -155,15 +155,61 @@ extension used — except this one only ever affects where a bitmap gets
 drawn, never any coordinate reported to a client, which is exactly the
 distinction that made the earlier design's remap unsafe and this one safe.
 
-This does **not** address cursor *sharpness* (the bitmap itself is still
-uploaded at its native size, so on a confined CRTC it now sits correctly
-positioned but visually smaller relative to the physical panel's pixel
-density than a "real" hardware cursor would look) — only *alignment*.
-Scaling the bitmap itself, if wanted later, is a separate, larger piece of
-work (resampling before upload through the driver's existing
-size-negotiating path, e.g. `drmmode_load_cursor_argb_check()`, which already
-falls back to software cursor gracefully — see its `FALSE` return path — if
-no compatible hardware size fits) and hasn't been attempted yet.
+### Bitmap scaling
+
+**Status: implemented, experimental — nearest-neighbor only.**
+
+Position mapping alone leaves the cursor *correctly placed* but visually
+undersized on a confined CRTC — the bitmap itself was still uploaded at its
+native size. Two layers needed fixing, both `modesetting`-DDX-specific:
+
+- `xf86_crtc_load_cursor_argb()` (`hw/xfree86/modes/xf86Cursors.c`) composes
+  a cursor glyph into the fixed-size hardware buffer, **once per enabled
+  CRTC** (every CRTC already gets its own independent upload here, which is
+  what makes a per-CRTC scale factor possible with no cross-CRTC
+  interference). It normally maps each destination pixel back to a source
+  pixel 1:1 (after accounting for rotation); when `XInputScaleGetCrtcScale()`
+  reports an active scale for that CRTC, the reverse-mapped coordinate is
+  additionally divided by the scale factor before the source lookup —
+  nearest-neighbor upsampling of the glyph into the same fixed buffer, so it
+  now occupies proportionally more of it.
+
+- `drmmode_load_cursor_argb_check()`
+  (`hw/xfree86/drivers/video/modesetting/drmmode_display.c`) independently
+  decides how much of that buffer is actually "the cursor" — which hardware
+  cursor plane size to use, and what region to crop/upload — by reading
+  `cursor->bits->width/height` straight off the `CursorPtr`, with no idea
+  that the layer above had already painted a larger glyph into the buffer.
+  Left alone, it cropped back down to the *original*, unscaled dimensions,
+  visibly clipping the correctly-scaled content. Fixed by having it apply
+  the same `XInputScaleGetCrtcScale()` factor to `glyph_width/height` before
+  they drive hardware-size selection and cropping — both layers now agree on
+  how big the glyph actually is.
+
+  This turned out to also close a gap for free: hardware-size selection
+  already picks the smallest hardware-supported cursor plane size `>=` the
+  glyph, and already returns `FALSE` (graceful software-cursor fallback) if
+  none fits. Since it now sees the *scaled* size, a scale factor large
+  enough that no supported plane size fits correctly falls back instead of
+  silently clipping.
+
+`XInputScaleGetCrtcScale(RRCrtcPtr, double *sx, double *sy)`
+(`Xext/inputscale/inputscale.c`, declared in `include/inputscale.h`) is the
+same `physical / confine` ratio the position mapping above uses — all three
+call sites consume the identical confinement state, so they can never
+disagree with each other. Each takes an `xf86CrtcPtr`'s `->randr_crtc` field
+to find the matching `RRCrtcPtr`.
+
+**Known rough edges, not yet handled:**
+
+- **Nearest-neighbor only** — blockier than a "real" higher-density hardware
+  cursor would look. An accepted tradeoff for latency, per the original
+  motivation, but bilinear would look better if the cost is acceptable.
+- **Hotspot correction is folded into position mapping, not verified in
+  practice yet** — `XInputScaleLogicalToPhysicalCursor()` now takes the
+  *unscaled* hotspot and applies a `-hotspot × (scale - 1)` correction so the
+  scaled hotspot pixel lands where the pointer tip actually is; this has not
+  been visually confirmed against a real scaled cursor theme/click point yet.
 
 ## Experimental: lying in RandR geometry replies
 
