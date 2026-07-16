@@ -31,6 +31,8 @@
  */
 #include <dix-config.h>
 
+#include <math.h>
+
 #include <X11/Xmd.h>
 #include <X11/Xproto.h>
 
@@ -44,6 +46,7 @@
 #include "Xext/randr/randrstr_priv.h"       /* VERIFY_RR_CRTC, rrGetScrPriv */
 
 #include "inputscaleproto.h"
+#include "include/inputscale.h"
 
 Bool noXInputScaleExtension = FALSE;
 
@@ -52,7 +55,7 @@ Bool noXInputScaleExtension = FALSE;
  * no-compositor case costs a single comparison. */
 static int xis_active_count = 0;
 
-static Bool
+Bool
 XInputScaleActive(void)
 {
     return !noXInputScaleExtension && xis_active_count > 0;
@@ -107,6 +110,61 @@ xis_box_contains_box(const BoxRec *outer, const BoxRec *inner)
 {
     return inner->x1 >= outer->x1 && inner->x2 <= outer->x2 &&
            inner->y1 >= outer->y1 && inner->y2 <= outer->y2;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Hardware cursor placement: logical -> physical, for the sprite only
+ *
+ *  The pointer's logical position (pPointer->x/y, used for hit-testing,
+ *  QueryPointer, event reporting) is never remapped by this extension - see
+ *  the file header. But a *hardware* cursor plane is positioned by the
+ *  driver in physical scanout coordinates, which differ from the logical
+ *  coordinate range while a CRTC is confined. Without this, the HW cursor
+ *  sprite visibly points at the wrong place on a confined CRTC (it ends up
+ *  positioned as if logical == physical, which is only true when nothing is
+ *  confined) - this is the one place a logical->physical mapping is needed,
+ *  scoped strictly to where the sprite is drawn (see mi/mipointer.c,
+ *  miPointerUpdateSprite()), never to any reported/hit-test coordinate.
+ * ------------------------------------------------------------------ */
+
+void
+XInputScaleLogicalToPhysicalCursor(ScreenPtr pScreen, int *x, int *y)
+{
+    rrScrPrivPtr pScrPriv;
+
+    if (!XInputScaleActive() || !pScreen)
+        return;
+
+    pScrPriv = rrGetScrPriv(pScreen);
+    if (!pScrPriv)
+        return;
+
+    for (int i = 0; i < pScrPriv->numCrtcs; i++) {
+        RRCrtcPtr crtc = pScrPriv->crtcs[i];
+        BoxRec physical;
+        int confine_w, confine_h, physical_w, physical_h;
+
+        if (!crtc->confine_active)
+            continue;
+        if (!xis_box_contains(&crtc->confine_box, *x, *y))
+            continue;
+        if (!xis_crtc_box(&physical, crtc))
+            continue;
+
+        confine_w = crtc->confine_box.x2 - crtc->confine_box.x1;
+        confine_h = crtc->confine_box.y2 - crtc->confine_box.y1;
+        physical_w = physical.x2 - physical.x1;
+        physical_h = physical.y2 - physical.y1;
+
+        if (confine_w <= 0 || confine_h <= 0)
+            return;
+
+        *x = physical.x1 + (int) lround((double) (*x - crtc->confine_box.x1)
+                                        * physical_w / confine_w);
+        *y = physical.y1 + (int) lround((double) (*y - crtc->confine_box.y1)
+                                        * physical_h / confine_h);
+        return;
+    }
 }
 
 /* ------------------------------------------------------------------ *

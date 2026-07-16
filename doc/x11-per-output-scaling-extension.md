@@ -3,9 +3,15 @@
 Server-side extension that lets a compositor confine the pointer, per CRTC,
 to a sub-rectangle of that CRTC's **physical** scanout area — the "logical"
 region it is actually drawing sharp, higher-density content into for that
-output. It touches exactly one thing: where the cursor is allowed to be. It
-does **not** remap window geometry, click/hit-testing, or any RandR geometry
-query — those stay exactly as they already are.
+output. The core mechanism touches exactly one thing: where the cursor is
+allowed to be. It does **not** remap window geometry or click/hit-testing —
+those stay exactly as they already are. Two additional, separately-flagged
+pieces build on the same confinement state: mapping the *hardware cursor's*
+draw position from logical to physical space (§Hardware cursor position
+mapping), and an experimental RandR geometry override to help popup
+placement (§Experimental). Both are opt-in by construction — they only ever
+affect a CRTC that has confinement active — but are newer and less
+battle-tested than the core confinement mechanism.
 
 ## Why this exists, and why it's this narrow
 
@@ -101,9 +107,106 @@ rectangle.
   (`ClientStateGone`/`Retained`), so a compositor crash can never leave the
   cursor stuck confined to a box nothing is drawing into anymore.
 
-- **No input/geometry hooks anywhere else.** Unlike the coordinate-transform
-  design this replaced, nothing in `dix/getevents.c` or any RandR query path
-  is touched — that's the whole point.
+- **No click/hit-test remap.** Unlike the coordinate-transform design this
+  replaced, nothing in `dix/getevents.c` is touched — the pointer position
+  used for hit-testing, `QueryPointer`, and event reporting is never
+  remapped. The two pieces below are the only places this project's
+  logical/physical duality is allowed to leak past pure confinement, and both
+  are scoped to a single, narrow consumer each.
+
+## Hardware cursor position mapping
+
+**Status: implemented, narrowly scoped, no known issues yet.**
+
+A hardware cursor plane/sprite is positioned by the driver in *physical*
+scanout coordinates (e.g. `drmModeMoveCursor()` in the `modesetting` DDX,
+`hw/xfree86/drivers/video/modesetting/drmmode_display.c`). The pointer's
+logical position (`pPointer->x/y`) is correct for everything else, but handed
+directly to the driver it points the HW cursor at the wrong physical
+location on a confined CRTC — it's only correct when nothing is confined.
+
+`XInputScaleLogicalToPhysicalCursor()` (`Xext/inputscale/inputscale.c`) maps
+a logical point to the corresponding physical point using whichever CRTC's
+confine box currently contains it: `physical = crtc_physical_origin +
+(logical - confine_box_origin) × (physical_size / confine_size)`. It is
+called from **both** places in `mi/mipointer.c` that push a position to the
+sprite backend (`spriteFuncs->SetCursor`/`MoveCursor`), each via a local
+`hwx, hwy` pair computed just for that call:
+
+- `miPointerUpdateSprite()` — the normal sprite update path.
+- `miPointerMoveNoEvent()` — the "silken mouse" *immediate* update path,
+  which runs on every motion event ahead of the normal update cycle
+  specifically for low perceived latency. Missing this one was the first
+  attempt's bug: the sprite would flash at the unscaled/physical position on
+  every move (this fast path's uncorrected write) before
+  `miPointerUpdateSprite()` corrected it moments later — briefly but
+  continuously visible while the pointer was in motion, even though
+  `pPointer->x/y` (and therefore hit-testing and click position) were
+  already correct the whole time.
+
+In both places, `pPointer->devx/devy` (compared against `pPointer->x/y` to
+decide whether anything moved) are never touched by this — they stay
+logical, exactly as before this addition, so nothing about hit-testing,
+dedup, or reporting changes.
+
+Declared in [`include/inputscale.h`](../include/inputscale.h), mirroring the
+`XInputTransformPhysToLogical`-style DIX helper the earlier, removed
+extension used — except this one only ever affects where a bitmap gets
+drawn, never any coordinate reported to a client, which is exactly the
+distinction that made the earlier design's remap unsafe and this one safe.
+
+This does **not** address cursor *sharpness* (the bitmap itself is still
+uploaded at its native size, so on a confined CRTC it now sits correctly
+positioned but visually smaller relative to the physical panel's pixel
+density than a "real" hardware cursor would look) — only *alignment*.
+Scaling the bitmap itself, if wanted later, is a separate, larger piece of
+work (resampling before upload through the driver's existing
+size-negotiating path, e.g. `drmmode_load_cursor_argb_check()`, which already
+falls back to software cursor gracefully — see its `FALSE` return path — if
+no compatible hardware size fits) and hasn't been attempted yet.
+
+## Experimental: lying in RandR geometry replies
+
+**Status: experimental, not part of the core extension above, opt-in by
+nature of only affecting a CRTC that has confinement active.**
+
+The core extension only stops the cursor from *moving* into unused scanout
+pixels. It does nothing about a toolkit computing where to place a popup:
+that math typically starts from the pointer position (already correct,
+untouched) but also consults monitor/output geometry via RandR
+(`XRRGetCrtcInfo`, `XRRGetMonitors`) or `_NET_WORKAREA` to decide where the
+screen "ends". `_NET_WORKAREA` is compositor-owned (KWin can already set it
+freely, no server change needed) but is a single box per virtual desktop in
+this project's KWin fork (`Workspace::updateClientArea()`), not per monitor —
+forcing it to the confined CRTC's box would break popup placement on any
+*other*, unconfined monitor via `QScreen::availableGeometry()`'s
+geometry ∩ workarea intersection. RandR's per-CRTC/per-monitor replies don't
+have that problem: each output already gets its own independent rectangle.
+
+So, while a CRTC has an active confine box, two reply paths report that box
+instead of the true physical scanout box:
+
+- `ProcRRGetCrtcInfo()` (`Xext/randr/rrcrtc.c`) — backs `XRRGetCrtcInfo`.
+- `RRMonitorGetCrtcGeometry()` (`Xext/randr/rrmonitor.c`) — backs
+  `XRRGetMonitors` for server-generated (non client-defined) monitors, and is
+  recomputed live on every query, so it always reflects current confinement
+  state.
+
+Both are narrowly scoped: only the confined CRTC's own reply is affected,
+every other output's geometry is untouched, and the lie disappears the
+instant confinement is reset or the owning client disconnects (same
+auto-revert as everything else here) — `pScreen->width/height`, RandR screen
+resources, and every other reply path are untouched.
+
+**Known tradeoff, accepted deliberately for now:** anything else that reads
+these same replies while confinement is active — `xrandr`, KDE Display
+Settings/`kscreen`, screen capture/remote-desktop tools — sees the confined
+box too, not the true physical geometry. There's no per-client filtering;
+the lie is visible to every client querying that CRTC while it's active.
+This is considered acceptable for now because it's exactly reversible and
+scoped to only while a compositor has actively chosen to scale that output,
+but it's the reason this piece is called out as experimental rather than
+folded into the "done" list above.
 
 ## Build & enable
 
