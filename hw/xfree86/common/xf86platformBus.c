@@ -465,9 +465,29 @@ xf86ClaimPlatformSlot(struct xf86_platform_device * d, DriverPtr drvp,
 }
 
 static int
-xf86UnclaimPlatformSlot(struct xf86_platform_device *d, GDevPtr dev)
+xf86UnclaimPlatformSlot(struct xf86_platform_device *d, GDevPtr dev,
+                        int entityIndex)
 {
     int i;
+
+    /*
+     * When the caller knows the exact entity it claimed, release that one.
+     * Searching by device pointer instead would find the first entity bound
+     * to the same physical device, which can belong to a different driver
+     * that already probed it successfully. Tearing that entity down
+     * corrupts the still-in-use slot and crashes the later PreInit of 
+     * the successful driver.
+     */
+    if (entityIndex >= 0 && entityIndex < xf86NumEntities) {
+        const EntityPtr p = xf86Entities[entityIndex];
+
+        if ((p->bus.type == BUS_PLATFORM) && (p->bus.id.plat == d)) {
+            if (dev)
+                xf86RemoveDevFromEntity(entityIndex, dev);
+            p->bus.type = BUS_NONE;
+        }
+        return 0;
+    }
 
     for (i = 0; i < xf86NumEntities; i++) {
         const EntityPtr p = xf86Entities[i];
@@ -491,9 +511,14 @@ static Bool doPlatformProbe(struct xf86_platform_device *dev, DriverPtr drvp,
 {
     Bool foundScreen = FALSE;
     int entity;
+    Bool freshEntity;
 
     entity = xf86ClaimPlatformSlot(dev, drvp, 0,
                                    gdev, gdev ? gdev->active : 0);
+
+    /* xf86ClaimPlatformSlot only returns an index when it allocated a new
+     * entity for us; a reused entity (below) is shared with another screen. */
+    freshEntity = (entity != -1);
 
     if ((entity == -1) && gdev) {
         if (gdev->screen == 0)
@@ -525,8 +550,13 @@ static Bool doPlatformProbe(struct xf86_platform_device *dev, DriverPtr drvp,
 
         if (drvp->platformProbe(drvp, entity, flags, dev, match_data))
             foundScreen = TRUE;
-        else
-            xf86UnclaimPlatformSlot(dev, gdev);
+        else if (freshEntity)
+            /* Tear down exactly the entity we just allocated. */
+            xf86UnclaimPlatformSlot(dev, gdev, entity);
+        else if (gdev)
+            /* Reused a shared entity: only detach our device, leave the
+             * entity intact for the screen that legitimately owns it. */
+            xf86RemoveDevFromEntity(entity, gdev);
     }
     return foundScreen;
 }
@@ -756,7 +786,7 @@ xf86platformAddDevice(const char *driver_name, int index)
    scr_index = AddGPUScreen(xf86GPUScreens[i]->ScreenInit, 0, NULL);
    if (scr_index == -1) {
        xf86DeleteScreen(xf86GPUScreens[i]);
-       xf86UnclaimPlatformSlot(&xf86_platform_devices[index], NULL);
+       xf86UnclaimPlatformSlot(&xf86_platform_devices[index], NULL, -1);
        xf86NumGPUScreens = old_screens;
        return -1;
    }
@@ -768,7 +798,7 @@ xf86platformAddDevice(const char *driver_name, int index)
    if (dixScreenRaiseCreateResources(xf86GPUScreens[i]->pScreen)) {
        RemoveGPUScreen(xf86GPUScreens[i]->pScreen);
        xf86DeleteScreen(xf86GPUScreens[i]);
-       xf86UnclaimPlatformSlot(&xf86_platform_devices[index], NULL);
+       xf86UnclaimPlatformSlot(&xf86_platform_devices[index], NULL, -1);
        xf86NumGPUScreens = old_screens;
        return -1;
    }
@@ -823,7 +853,7 @@ xf86platformRemoveDevice(int index)
     RemoveGPUScreen(xf86GPUScreens[i]->pScreen);
     xf86DeleteScreen(xf86GPUScreens[i]);
 
-    xf86UnclaimPlatformSlot(&xf86_platform_devices[index], NULL);
+    xf86UnclaimPlatformSlot(&xf86_platform_devices[index], NULL, ent_num);
 
     xf86_remove_platform_device(index);
 
