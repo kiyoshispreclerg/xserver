@@ -1,3 +1,37 @@
+/* SPDX-License-Identifier: MIT OR X11 OR GPL-3.0-or-later
+ *
+ * XNOTIFY extension - runtime permission gate and activity notifier.
+ *
+ * Lets an external, trusted "permission manager" (the guard) mediate what X11
+ * clients are allowed to do - inject/grab input, take screenshots, manage other
+ * windows, own the selection, etc. - on a per-executable basis, and be notified
+ * when a client first attempts a sensitive action.
+ *
+ * Model: every sensitive action is a bit (see the XNOTIFY_* action bits in
+ * xnotify.h). Permission state lives in three places, consulted in order by
+ * XnotifyIsAllowed():
+ *   1. a per-client cached bitmask (client devPrivate, via XnotifyPermMask),
+ *   2. a global allow mask (xnotify_global_allow_mask),
+ *   3. a rule table keyed by executable path/args (perm_hash_table +
+ *      rule_list_head), populated from config files and guard commands.
+ * On a miss the guard is notified (Xnotify) so it can prompt the user, and the
+ * request is denied until a rule grants it.
+ *
+ * Two AF_UNIX/SOCK_DGRAM sockets carry the JSON protocol:
+ *   - notify_sock  (server -> guard, connected): REPORT and notify messages.
+ *   - command_sock (guard -> server, bound): heartbeats and commands. It is
+ *     driven by the server poll loop via SetNotifyFd (XnotifyCommandReadable),
+ *     so an idle desktop with no guard keeps zero timers armed.
+ * Inbound messages are trusted only if they carry SO_PASSCRED peer credentials
+ * matching the server uid (or root) AND come from an executable that itself
+ * holds the XNOTIFY_GUARD permission (is_trusted_sender).
+ *
+ * The guard proves liveness with periodic heartbeats; if it goes silent for
+ * GUARD_HEARTBEAT_TIMEOUT the server reverts to static config permissions
+ * (XnotifyIsGuardAlive). Enforcement is bypassed entirely when the extension is
+ * disabled at runtime (xnotify_enabled) or when neither a guard nor security
+ * mode is active.
+ */
 #include <dix-config.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -36,17 +70,23 @@ XnotifyPermMask(ClientPtr client)
     return dixLookupPrivate(&client->devPrivates, &xnotify_client_priv_key);
 }
 
-XPermEntry *rule_list_head = NULL;
-static XPermEntry *rule_list_tail = NULL;
-XPermEntry *perm_hash_table[HASH_TABLE_SIZE] = {0};
-uint32_t    xnotify_global_allow_mask = 0;
+/* Permission rules keyed by executable. Every rule lives in both structures:
+ * perm_hash_table for O(1) exact-path lookup, and the rule_list_head/tail
+ * singly-linked list for ordered pattern (wildcard) matching. */
+XPermEntry *rule_list_head = NULL;               /**< head of the ordered rule list */
+static XPermEntry *rule_list_tail = NULL;        /**< tail, for O(1) append */
+XPermEntry *perm_hash_table[HASH_TABLE_SIZE] = {0}; /**< exact-path hash buckets */
+uint32_t    xnotify_global_allow_mask = 0;       /**< actions allowed for every client */
 
+/** One (exe, action) notification awaiting a guard decision, with its timestamp. */
 typedef struct {
-    char  exe[EXE_PATH_MAX];
-    int   action;
-    Time  last_time;
+    char  exe[EXE_PATH_MAX];    /**< executable path that triggered the prompt */
+    int   action;               /**< XNOTIFY_* action bit being requested */
+    Time  last_time;            /**< when the guard was last notified about it */
 } XPendingEntry;
 
+/* Throttles repeat prompts: suppresses re-notifying the guard for the same
+ * (exe, action) within XNOTIFY_PENDING_THROTTLE_MS. */
 static XPendingEntry xpending_cache[XNOTIFY_CACHE_MAX] = {0};
 static int           xpending_count = 0;
 
@@ -83,6 +123,15 @@ find_exact_entry(const char *exe) {
     return NULL;
 }
 
+/**
+ * @brief find the permission rule that applies to a client executable
+ *
+ * Tries an exact-path hash lookup first, then falls back to ordered wildcard
+ * pattern matching over the rule list.
+ *
+ * @param info resolved executable path (and args) of the client
+ * @return matching rule, or NULL if no rule applies
+ */
 static XPermEntry *
 find_matching_entry(const ClientExeInfo *info) {
     if (!info || !info->exe || !*info->exe)
@@ -101,6 +150,16 @@ find_matching_entry(const ClientExeInfo *info) {
     return NULL;
 }
 
+/**
+ * @brief return the exact-path rule for an executable, creating it if absent
+ *
+ * A newly created rule starts with an empty permission mask and is inserted
+ * into both the hash table and the ordered rule list.
+ *
+ * @param exe  executable path (exact key)
+ * @param args optional argument string stored on the rule, may be NULL
+ * @return the existing or newly allocated rule, or NULL on allocation failure
+ */
 static XPermEntry *
 create_or_get_entry(const char *exe, const char *args) {
     XPermEntry *existing = find_exact_entry(exe);
@@ -135,6 +194,18 @@ create_or_get_entry(const char *exe, const char *args) {
     return new_entry;
 }
 
+/**
+ * @brief test a client (exe, args) against a rule pattern
+ *
+ * Rule strings may contain '*' wildcards; args are only compared when the rule
+ * specifies an args pattern.
+ *
+ * @param exe       client executable path
+ * @param args      client argument string, may be NULL
+ * @param rule_exe  rule executable pattern
+ * @param rule_args rule argument pattern, or NULL to match any args
+ * @return TRUE if the client matches the rule
+ */
 static Bool
 pattern_matches(const char *exe, const char *args, const char *rule_exe, const char *rule_args) {
     if (!exe || !rule_exe)
@@ -297,6 +368,13 @@ XnotifyLoadFile(const char *filename) {
     return loaded;
 }
 
+/**
+ * @brief reset all rules and reload permissions from the config files
+ *
+ * Clears the current rule table and re-reads the static allow/deny rules from
+ * the configuration directory. Used at startup and when reverting to static
+ * permissions after the guard disconnects.
+ */
 void
 XnotifyLoadConfig(void) {
     for (int i = 0; i < HASH_TABLE_SIZE; i++) {
@@ -382,12 +460,26 @@ XnotifyLoadConfigDir(const char *dir_path) {
     return loaded;
 }
 
+/**
+ * @brief clear a single client's cached permission mask
+ *
+ * Forces the next XnotifyIsAllowed() for this client to re-evaluate against the
+ * rule table (e.g. after its rules changed).
+ *
+ * @param client the client whose cached mask to drop
+ */
 void
 XnotifyInvalidateClientCache(ClientPtr client) {
     if (client)
         *XnotifyPermMask(client) = 0;
 }
 
+/**
+ * @brief clear every client's cached permission mask
+ *
+ * Used on a global permission change (config reload, guard death) so all clients
+ * re-evaluate on their next action.
+ */
 void
 XnotifyInvalidateAllClientCaches(void) {
     for (int i = 0; i < currentMaxClients; i++) {
@@ -460,6 +552,12 @@ XnotifyRemovePending(const char *exe, int action) {
     }
 }
 
+/**
+ * @brief grant an action to an executable (guard "allow" command)
+ * @param action XNOTIFY_* action bit to grant
+ * @param exe    executable path the rule applies to
+ * @param args   optional argument pattern, may be NULL
+ */
 void
 XnotifyAllowExe(const int action, const char *exe, const char *args) {
     if (action == 0 || !exe || *exe == '\0')
@@ -472,6 +570,11 @@ XnotifyAllowExe(const int action, const char *exe, const char *args) {
     }
 }
 
+/**
+ * @brief revoke an action from every rule matching an executable (guard "deny")
+ * @param action XNOTIFY_* action bit to clear
+ * @param exe    executable path to match (exact rule plus wildcard rules)
+ */
 void
 XnotifyDenyExe(const int action, const char *exe) {
     if (action == 0 || !exe || !*exe)
@@ -497,6 +600,11 @@ XnotifyDenyExe(const int action, const char *exe) {
     }
 }
 
+/**
+ * @brief grant every action to an executable
+ * @param exe  executable path the rule applies to
+ * @param args optional argument pattern, may be NULL
+ */
 void
 XnotifyAllowAll(const char *exe, const char *args) {
     if (!exe || *exe == '\0')
@@ -509,6 +617,10 @@ XnotifyAllowAll(const char *exe, const char *args) {
     }
 }
 
+/**
+ * @brief revoke every action from an executable's exact-path rule
+ * @param exe executable path whose rule to clear
+ */
 void
 XnotifyDenyAll(const char *exe) {
     if (!exe || !*exe)
@@ -520,6 +632,10 @@ XnotifyDenyAll(const char *exe) {
     }
 }
 
+/**
+ * @brief allow an action for every client, globally
+ * @param action XNOTIFY_* action bit to add to the global allow mask
+ */
 void
 XnotifyAllowAction(const int action) {
     if (action > 0 && action <= XNOTIFY_MAX_ACTIONS)
@@ -536,6 +652,13 @@ XnotifyAllowAction(const int action) {
     }
 }
 
+/**
+ * @brief list the executables granted a given action
+ * @param action   XNOTIFY_* action bit to query
+ * @param out_exes caller-provided array to fill with executable paths
+ * @param max_exes capacity of @p out_exes
+ * @return number of executables written, or -1 if the action is globally allowed
+ */
 int
 XnotifyQueryAction(const int action, char out_exes[][EXE_PATH_MAX], int max_exes) {
     if (action == 0 || !out_exes || max_exes <= 0)
@@ -558,6 +681,10 @@ XnotifyQueryAction(const int action, char out_exes[][EXE_PATH_MAX], int max_exes
     return count;
 }
 
+/**
+ * @brief revoke an action everywhere: global mask and all executable rules
+ * @param action XNOTIFY_* action bit to clear
+ */
 void
 XnotifyClear(const int action) {
     if (action <= 0) return;
@@ -613,6 +740,16 @@ XnotifyCacheCleanup(void) {
     xpending_count = write_idx;
 }
 
+/**
+ * @brief resolve a pid to its executable path, with an LRU cache
+ *
+ * Reads /proc/<pid>/exe (falling back to /proc/<pid>/cmdline) on a cache miss
+ * and stores the result; the returned pointer is owned by the cache and stays
+ * valid until the entry is evicted.
+ *
+ * @param pid client process id
+ * @return cached executable path, or NULL if it cannot be resolved
+ */
 static char *
 XnotifyGetExe(pid_t pid) {
     if (pid <= 0)
@@ -675,6 +812,13 @@ XnotifyGetExe(pid_t pid) {
     }
 }
 
+/**
+ * @brief resolve a client's executable path and argument string
+ *
+ * @param client the X11 client
+ * @return owned copies in .exe/.args (caller must free); .exe is NULL if the
+ *         executable cannot be resolved
+ */
 ClientExeInfo
 GetClientExeInfo(ClientPtr client) {
     ClientExeInfo info = { .exe = NULL, .args = NULL };
@@ -705,25 +849,35 @@ GetClientExePath(ClientPtr client)
     return XnotifyGetExe(pid);
 }
 
-static int notify_sock = -1;
-static int command_sock = -1;
+static int notify_sock = -1;   /**< server -> guard datagram socket (connected) */
+static int command_sock = -1;  /**< guard -> server datagram socket (bound, poll-driven) */
 /* Armed only while a permission manager (guard) is connected, so an idle
  * desktop with no guard keeps zero timers running (the command socket is
  * event-driven via SetNotifyFd, not polled). */
 static OsTimerPtr guard_liveness_timer = NULL;
 
-static Bool guard_active = FALSE;
-static Time last_guard_heartbeat = 0;
-#define GUARD_HEARTBEAT_TIMEOUT  5000
-static pid_t pid_guard = 0;
+/* Guard liveness state. guard_active flips true on the first heartbeat and
+ * back to false when heartbeats stop for GUARD_HEARTBEAT_TIMEOUT ms. */
+static Bool guard_active = FALSE;          /**< is a guard currently connected? */
+static Time last_guard_heartbeat = 0;      /**< timestamp of the last heartbeat */
+#define GUARD_HEARTBEAT_TIMEOUT  5000      /**< ms of silence before the guard is dead */
+static pid_t pid_guard = 0;                /**< pid of the connected guard */
 
-static Bool xnotify_enabled = TRUE;
+static Bool xnotify_enabled = TRUE;        /**< runtime master switch (DISABLE command) */
 
 static void XnotifyInitCommand(void);
 static Bool XnotifyIsGuardAlive(void);
 static void XnotifyCommandReadable(int fd, int ready, void *data);
 static CARD32 XnotifyGuardLivenessTimer(OsTimerPtr timer, CARD32 now, void *arg);
 
+/**
+ * @brief record a guard heartbeat, marking the guard alive
+ *
+ * On the first heartbeat this marks the guard connected and arms the liveness
+ * watchdog timer. No-op unless security mode is active.
+ *
+ * @param pid pid of the guard that sent the heartbeat
+ */
 static void
 XnotifyGuardHeartbeat(pid_t pid) {
     if (!security_mode)
@@ -763,6 +917,15 @@ XnotifyClearAllDynamicPermissions(void) {
     xnotify_last_cleanup = 0;
 }
 
+/**
+ * @brief check whether the guard is still alive, reverting permissions if not
+ *
+ * If more than GUARD_HEARTBEAT_TIMEOUT ms have passed since the last heartbeat,
+ * the guard is declared dead: dynamic permissions are cleared and static config
+ * is reloaded. This is the lazy safety net called on every permission decision.
+ *
+ * @return TRUE if a guard is currently connected and alive
+ */
 static Bool
 XnotifyIsGuardAlive(void) {
     if (!guard_active)
@@ -853,6 +1016,18 @@ XnotifyExeIsGuard(const char *exe) {
     return FALSE;
 }
 
+/**
+ * @brief decide whether an inbound command datagram may be trusted
+ *
+ * Requires SO_PASSCRED peer credentials whose uid matches the server (or root),
+ * and that the sending process's executable itself holds XNOTIFY_GUARD. This is
+ * what prevents an arbitrary local client from impersonating the guard.
+ *
+ * @param have_cred whether peer credentials were received
+ * @param peer_uid  sender uid from SCM_CREDENTIALS
+ * @param peer_pid  sender pid from SCM_CREDENTIALS
+ * @return TRUE if the sender is an authorized guard
+ */
 static Bool
 is_trusted_sender(Bool have_cred, uid_t peer_uid, pid_t peer_pid) {
     if (!security_mode)
@@ -889,6 +1064,17 @@ is_trusted_sender(Bool have_cred, uid_t peer_uid, pid_t peer_pid) {
     return TRUE;
 }
 
+/**
+ * @brief receive one datagram plus the sender's peer credentials
+ *
+ * @param fd        the bound command socket
+ * @param buf       output buffer for the message
+ * @param buflen    size of @p buf
+ * @param have_cred out: set TRUE if SCM_CREDENTIALS were present
+ * @param peer_uid  out: sender uid (if have_cred)
+ * @param peer_pid  out: sender pid (if have_cred)
+ * @return bytes received, 0 on orderly shutdown, or <0 on error
+ */
 static ssize_t
 XnotifyRecvCommand(int fd, char *buf, size_t buflen,
                    Bool *have_cred, uid_t *peer_uid, pid_t *peer_pid) {
@@ -929,6 +1115,12 @@ XnotifyRecvCommand(int fd, char *buf, size_t buflen,
     return n;
 }
 
+/**
+ * @brief lazily open the outgoing (server -> guard) notify socket
+ *
+ * Connects a non-blocking datagram socket to the guard's notify socket path.
+ * No-op if already open or if the guard is not listening.
+ */
 static void
 XnotifyInit(void) {
     if (notify_sock != -1)
@@ -953,6 +1145,13 @@ XnotifyInit(void) {
     }
 }
 
+/**
+ * @brief create and register the inbound (guard -> server) command socket
+ *
+ * Binds a non-blocking SO_PASSCRED datagram socket at the well-known command
+ * path and registers it with the server poll loop (SetNotifyFd), so commands
+ * are handled event-driven with no polling timer. No-op if already set up.
+ */
 static void
 XnotifyInitCommand(void) {
     if (command_sock != -1)
@@ -997,7 +1196,16 @@ XnotifyInitCommand(void) {
         ErrorF("Xnotify: failed to register command socket with poll loop\n");
 }
 
-/* Called by the poll loop when the command socket has pending datagrams. */
+/**
+ * @brief poll-loop callback: drain the command socket when it becomes readable
+ *
+ * Registered via SetNotifyFd; runs opportunistic cache cleanup and processes
+ * all pending command datagrams.
+ *
+ * @param fd    the command socket (unused; module-global)
+ * @param ready poll readiness mask (unused)
+ * @param arg   user data (unused)
+ */
 static void
 XnotifyCommandReadable(int fd, int ready, void *arg) {
     (void)fd; (void)ready; (void)arg;
@@ -1005,8 +1213,15 @@ XnotifyCommandReadable(int fd, int ready, void *arg) {
     XnotifyPoll();
 }
 
-/* Armed only while a guard is connected: notices the guard dying even with no
- * traffic, then stops re-arming (returns 0) so idle stays timer-free. */
+/**
+ * @brief watchdog that detects the guard dying while the system is idle
+ *
+ * Armed only while a guard is connected. Re-arms itself as long as the guard is
+ * alive; once the guard is gone it returns 0 to stop, so an idle desktop with
+ * no guard keeps zero timers running.
+ *
+ * @return the re-arm interval in ms, or 0 to stop the timer
+ */
 static CARD32
 XnotifyGuardLivenessTimer(OsTimerPtr timer, CARD32 now, void *arg) {
     (void)timer; (void)now; (void)arg;
@@ -1130,6 +1345,16 @@ XnotifyGrantPermission(ClientPtr client, int action) {
     *XnotifyPermMask(client) |= bit;
 }
 
+/**
+ * @brief tell the guard that an already-permitted action just happened
+ *
+ * Telemetry only (not enforcement). Heavily throttled: a cheap per-(pid,action)
+ * gate short-circuits bursts before any allocation or socket work, backed by the
+ * (exe, action) report throttle. No-op if disabled or no guard is alive.
+ *
+ * @param client the client performing the action
+ * @param action XNOTIFY_* action bit that was permitted
+ */
 void
 XnotifyReport(ClientPtr client, const int action) {
     if (!xnotify_enabled)
@@ -1177,6 +1402,20 @@ XnotifyReport(ClientPtr client, const int action) {
     }
 }
 
+/**
+ * @brief central permission gate: may this client perform this action?
+ *
+ * Consulted throughout the server before sensitive operations. Fast-passes when
+ * the extension is disabled or no guard/security is active. Otherwise checks, in
+ * order: the per-client cached mask, the global allow mask, then a rule match on
+ * the client's executable. On a rule grant the client mask is updated so future
+ * checks are O(1); on a miss the guard is notified (throttled) and the action is
+ * denied until a rule allows it.
+ *
+ * @param client the requesting X11 client
+ * @param action XNOTIFY_* action bit being attempted
+ * @return TRUE if allowed, FALSE if denied
+ */
 Bool
 XnotifyIsAllowed(ClientPtr client, const int action) {
     if (!xnotify_enabled)
@@ -1234,6 +1473,14 @@ XnotifyIsAllowed(ClientPtr client, const int action) {
     return FALSE;
 }
 
+/**
+ * @brief drain and process all pending command datagrams from the guard
+ *
+ * Reads each queued message, verifies the sender (is_trusted_sender), and
+ * dispatches heartbeats and commands (ENABLE/DISABLE/allow/deny/query/status).
+ * Invoked by XnotifyCommandReadable when the poll loop reports the socket
+ * readable.
+ */
 void
 XnotifyPoll(void) {
     if (command_sock == -1) {
@@ -1430,6 +1677,16 @@ XnotifyPoll(void) {
     XnotifyGuardHeartbeat(0);
 }
 
+/**
+ * @brief send a full notification to the guard so it can prompt the user
+ *
+ * Emitted when a client attempts an action no rule yet covers. Includes the
+ * client's executable, args, and pid. Lazily opens both sockets; no-op if
+ * disabled or no guard is alive.
+ *
+ * @param client the client whose action triggered the prompt
+ * @param action XNOTIFY_* action bit being requested
+ */
 void
 Xnotify(ClientPtr client, const int action) {
     if (!xnotify_enabled)
@@ -1490,6 +1747,11 @@ ProcXnotifyQueryVersion(ClientPtr client)
     return X_SEND_REPLY_SIMPLE(client, reply);
 }
 
+/**
+ * @brief top-level request handler for the XNOTIFY extension
+ * @param client the requesting client
+ * @return an X11 request status (Success or BadRequest for unknown minor ops)
+ */
 static int
 ProcXnotifyDispatch(ClientPtr client)
 {
@@ -1503,6 +1765,13 @@ ProcXnotifyDispatch(ClientPtr client)
     }
 }
 
+/**
+ * @brief register the XNOTIFY extension and bring up the command socket
+ *
+ * Registers the per-client permission-mask private and the protocol extension,
+ * then initializes the (event-driven) command socket. Called once at server
+ * start via the extension init table.
+ */
 void
 XnotifyExtensionInit(void)
 {
