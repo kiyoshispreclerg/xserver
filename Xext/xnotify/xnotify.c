@@ -707,7 +707,10 @@ GetClientExePath(ClientPtr client)
 
 static int notify_sock = -1;
 static int command_sock = -1;
-static OsTimerPtr command_timer = NULL;
+/* Armed only while a permission manager (guard) is connected, so an idle
+ * desktop with no guard keeps zero timers running (the command socket is
+ * event-driven via SetNotifyFd, not polled). */
+static OsTimerPtr guard_liveness_timer = NULL;
 
 static Bool guard_active = FALSE;
 static Time last_guard_heartbeat = 0;
@@ -718,7 +721,8 @@ static Bool xnotify_enabled = TRUE;
 
 static void XnotifyInitCommand(void);
 static Bool XnotifyIsGuardAlive(void);
-static CARD32 XnotifyTimerCallback(OsTimerPtr timer, CARD32 now, void *arg);
+static void XnotifyCommandReadable(int fd, int ready, void *data);
+static CARD32 XnotifyGuardLivenessTimer(OsTimerPtr timer, CARD32 now, void *arg);
 
 static void
 XnotifyGuardHeartbeat(pid_t pid) {
@@ -729,6 +733,10 @@ XnotifyGuardHeartbeat(pid_t pid) {
     if (!guard_active) {
         guard_active = TRUE;
         pid_guard = pid;
+        /* Start watching for the guard's death only now that one exists. */
+        guard_liveness_timer = TimerSet(guard_liveness_timer, 0,
+                                        GUARD_HEARTBEAT_TIMEOUT,
+                                        XnotifyGuardLivenessTimer, NULL);
         ErrorF("Xnotify: permission manager connected\n");
     }
 }
@@ -982,22 +990,28 @@ XnotifyInitCommand(void) {
     chmod(socket_path, 0600);
     ErrorF("Xnotify: socket ready at %s (waiting for permission manager)\n", socket_path);
 
-    if (command_timer == NULL) {
-        command_timer = TimerSet(command_timer, 0, 350, XnotifyTimerCallback, NULL);
-        if (command_timer == NULL)
-            ErrorF("Xnotify: failed to create timer\n");
-    }
+    /* Drive the command socket from the server's poll loop instead of a
+     * periodic timer: the server now only wakes when a datagram actually
+     * arrives, so an idle desktop stays blocked in epoll (no wakeup storm). */
+    if (!SetNotifyFd(command_sock, XnotifyCommandReadable, X_NOTIFY_READ, NULL))
+        ErrorF("Xnotify: failed to register command socket with poll loop\n");
 }
 
-static CARD32
-XnotifyTimerCallback(OsTimerPtr timer, CARD32 now, void *arg) {
-    (void)timer; (void)now; (void)arg;
-    command_timer = TimerSet(command_timer, 0, 500, XnotifyTimerCallback, NULL);
-    if (command_timer == NULL)
-        ErrorF("Xnotify: failed to recreate timer\n");
-
+/* Called by the poll loop when the command socket has pending datagrams. */
+static void
+XnotifyCommandReadable(int fd, int ready, void *arg) {
+    (void)fd; (void)ready; (void)arg;
     XnotifyCacheCleanup();
     XnotifyPoll();
+}
+
+/* Armed only while a guard is connected: notices the guard dying even with no
+ * traffic, then stops re-arming (returns 0) so idle stays timer-free. */
+static CARD32
+XnotifyGuardLivenessTimer(OsTimerPtr timer, CARD32 now, void *arg) {
+    (void)timer; (void)now; (void)arg;
+    if (XnotifyIsGuardAlive())
+        return GUARD_HEARTBEAT_TIMEOUT;
     return 0;
 }
 
