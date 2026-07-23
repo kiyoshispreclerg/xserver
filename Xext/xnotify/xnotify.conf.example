@@ -1,0 +1,196 @@
+# xnotify.conf — Xnotify permission configuration example
+#
+# The server reads /etc/xnotify.conf and all *.conf files under
+# /etc/xnotify.conf.d/ on startup.  Rules are applied in order;
+# later rules override earlier ones for the same executable/action.
+#
+# Syntax:
+#   ALLOW XNOTIFY <exe>            — trust <exe> as the external guard daemon
+#   ALLOW ALL <exe>                — grant every action to <exe>
+#   ALLOW ALL <exe>|<arg-pattern>  — same, but only when cmdline matches pattern
+#   ALLOW <action> <exe>           — grant a single action to <exe>
+#   ALLOW <action>                 — grant a single action globally (all clients)
+#   DENY  <action> <exe>           — revoke a single action from <exe>
+#   DENY  <action>                 — revoke a single action globally
+#
+# Available actions:
+#   ATTACH        — shared memory attach (MIT-SHM extension)
+#   SELECTION     — X selection (clipboard) read / write
+#   COMPOSITE     — composite window redirect
+#   SCREEN        — screen capture (XGetImage / XCopyArea on root)
+#   RECORD        — RECORD extension (event monitoring / macro recorders)
+#   CURSOR        — cursor image capture (XFixes)
+#   INPUT_GRAB    — keyboard / pointer grabs
+#   INPUT_INJECT  — XTest input injection
+#   HOTKEY        — global hotkey grabs
+#   INPUT         — raw input access (XInput)
+#   MANAGE        — window management (SubstructureRedirect)
+#   GRAB_OVERRIDE — bypass grab restrictions
+#
+# Lines starting with '#' are comments.  Blank lines are ignored.
+
+
+# ---------------------------------------------------------------------------
+# External guard daemon
+# When a guard is registered, it receives real-time permission requests over a
+# Unix socket and can allow or deny them dynamically.  The guard process must
+# be registered here before it can receive any notifications.
+# ---------------------------------------------------------------------------
+ALLOW XNOTIFY /usr/local/bin/xisguard
+
+
+# ---------------------------------------------------------------------------
+# Global action overrides
+# These apply to all clients, before any per-executable rules.
+# ---------------------------------------------------------------------------
+
+# Deny the RECORD extension globally — it can capture all keystrokes.
+# Re-allow below only for specific trusted tools if needed.
+DENY RECORD
+
+# Allow shared memory attach for everyone — required by most applications
+# for efficient pixmap transfers.
+ALLOW ATTACH
+
+
+# ---------------------------------------------------------------------------
+# Trusted X infrastructure (Xorg itself, nested servers, helpers)
+# ---------------------------------------------------------------------------
+ALLOW ALL /opt/xlibre/bin/X
+ALLOW ALL /opt/xlibre/bin/Xorg
+ALLOW ALL /opt/xlibre/bin/Xephyr
+ALLOW ALL /opt/xlibre/bin/Xnest
+ALLOW ALL /opt/xlibre/bin/Xvfb
+
+ALLOW ALL /usr/bin/xinit
+ALLOW ALL /usr/bin/xprop
+ALLOW ALL /usr/bin/xset
+ALLOW ALL /usr/bin/xrdb
+ALLOW ALL /usr/bin/xhost
+ALLOW ALL /usr/bin/xsetroot
+ALLOW ALL /usr/bin/setxkbmap
+ALLOW ALL /usr/bin/xbindkeys
+ALLOW ALL /usr/bin/xrandr
+ALLOW ALL /usr/bin/xinput
+ALLOW ALL /usr/bin/xterm
+ALLOW ALL /usr/bin/xprop
+ALLOW ALL /usr/bin/dbus-update-activation-environment
+ALLOW ALL /usr/local/bin/xisback
+
+
+# ---------------------------------------------------------------------------
+# Desktop environments
+# ---------------------------------------------------------------------------
+ALLOW ALL /usr/bin/xfwm4
+ALLOW ALL /usr/bin/xfce4-panel
+ALLOW ALL /usr/bin/pcmanfm-qt
+
+ALLOW ALL /usr/bin/gmenudbusmenuproxy
+ALLOW ALL /usr/bin/xembedsniproxy
+ALLOW ALL /usr/bin/xsettingsd
+ALLOW ALL /usr/bin/x-session-manager
+
+ALLOW ALL /usr/bin/startplasma-x11
+ALLOW ALL /usr/bin/ksmserver
+ALLOW ALL /usr/bin/kwin_x11
+ALLOW ALL /usr/bin/plasmashell
+ALLOW ALL /usr/bin/krunner
+ALLOW ALL /usr/bin/kglobalaccel5
+ALLOW ALL /usr/bin/kded5
+ALLOW ALL /usr/bin/kcminit
+ALLOW ALL /usr/bin/kcminit_startup
+ALLOW ALL /usr/bin/kapplymousetheme
+ALLOW ALL /usr/bin/kstart
+ALLOW ALL /usr/bin/kaccess
+ALLOW ALL /usr/bin/kup-daemon
+ALLOW ALL /usr/lib/x86_64-linux-gnu/libexec/kactivitymanagerd
+ALLOW ALL /usr/lib/x86_64-linux-gnu/libexec/kf5/kscreen_backend_launcher
+ALLOW ALL /usr/lib/x86_64-linux-gnu/libexec/kf5/kioslave5
+ALLOW ALL /usr/lib/x86_64-linux-gnu/libexec/polkit-kde-authentication-agent-1
+ALLOW ALL /usr/lib/x86_64-linux-gnu/libexec/DiscoverNotifier
+ALLOW ALL /usr/lib/x86_64-linux-gnu/libexec/drkonqi
+ALLOW ALL /usr/lib/x86_64-linux-gnu/libexec/kdeconnectd
+ALLOW ALL /usr/lib/x86_64-linux-gnu/libexec/org_kde_powerdevil
+ALLOW ALL /usr/bin/systemmonitor
+ALLOW ALL /usr/bin/ksystemstats
+ALLOW ALL /usr/bin/spectacle
+
+ALLOW ALL /usr/bin/i3
+ALLOW ALL /usr/bin/i3bar
+ALLOW ALL /usr/bin/dmenu
+
+ALLOW ALL /usr/bin/zenity
+
+
+# ---------------------------------------------------------------------------
+# Utilites
+# ---------------------------------------------------------------------------
+ALLOW ALL /usr/bin/fcitx5
+ALLOW ALL /usr/bin/ssh-agent
+ALLOW ALL /usr/libexec/at-spi-bus-launcher
+ALLOW ALL /usr/libexec/at-spi2-registryd
+ALLOW ALL /usr/libexec/ibus-ui-gtk3
+ALLOW ALL /usr/libexec/ibus-x11
+ALLOW ALL /usr/libexec/ibus-extension-gtk3
+ALLOW ALL /usr/libexec/xdg-desktop-portal-gtk
+ALLOW ALL /usr/lib/x86_64-linux-gnu/libexec/xdg-desktop-portal-kde
+ALLOW ALL /usr/bin/nvidia-settings
+ALLOW ALL /usr/lib/virtualbox/VirtualBox
+ALLOW ALL /usr/bin/input-leap
+ALLOW ALL /usr/bin/input-leaps
+ALLOW ALL /usr/bin/qps
+
+
+# ---------------------------------------------------------------------------
+# Common user applications
+# ---------------------------------------------------------------------------
+ALLOW ALL /usr/bin/kate
+ALLOW ALL /usr/bin/kwrite
+ALLOW ALL /usr/bin/dolphin
+ALLOW ALL /usr/bin/gwenview
+ALLOW ALL /usr/bin/okular
+ALLOW ALL /usr/bin/konsole
+ALLOW ALL /usr/bin/gimp
+ALLOW ALL /usr/bin/systemsettings
+ALLOW ALL /usr/bin/spectacle
+ALLOW ALL /usr/bin/filelight
+ALLOW ALL /usr/bin/kmenuedit
+ALLOW ALL /usr/lib/libreoffice/program/soffice.bin
+ALLOW ALL /usr/bin/audacious
+ALLOW ALL /usr/bin/smplayer
+ALLOW ALL /usr/bin/mpv
+ALLOW ALL /usr/bin/keepassxc
+ALLOW ALL /usr/bin/inkscape
+ALLOW ALL /usr/bin/compiz
+ALLOW ALL /usr/bin/emerald
+ALLOW ALL /usr/bin/featherpad
+ALLOW ALL /usr/bin/vlc
+ALLOW ALL /usr/sbin/synaptic
+ALLOW ALL /usr/bin/simplescreenrecorder
+ALLOW ALL /usr/bin/picom
+
+
+# ---------------------------------------------------------------------------
+# Python-based applications — matched by interpreter + argument pattern
+# Syntax: <interpreter>|<argument-glob>
+# ---------------------------------------------------------------------------
+ALLOW ALL /usr/bin/python3.10|/usr/bin/opensnitch-ui
+
+
+# ---------------------------------------------------------------------------
+# GRAB_OVERRIDE restriction
+#
+# Strip GRAB_OVERRIDE from every executable that was allowed above.
+# This prevents applications from bypassing pointer/keyboard grab rules,
+# while still allowing all other actions they were granted.
+# The small set below then gets GRAB_OVERRIDE restored explicitly.
+# ---------------------------------------------------------------------------
+DENY GRAB_OVERRIDE
+
+# Restore GRAB_OVERRIDE only for the session manager, screen locker, and
+# input-forwarding tools, which genuinely need it.
+ALLOW ALL /usr/bin/ksmserver
+ALLOW ALL /usr/bin/kcminit
+ALLOW ALL /lib/x86_64-linux-gnu/libexec/kscreenlocker_greet
+ALLOW ALL /usr/bin/input-leap
+ALLOW ALL /usr/bin/input-leaps
