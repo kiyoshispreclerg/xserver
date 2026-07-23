@@ -1,3 +1,9 @@
+/* SPDX-License-Identifier: MIT OR X11 OR GPL-3.0-or-later
+ *
+ * XNOTIFY extension - public interface: wire protocol structs, the per-action
+ * permission bits, and the server-internal permission API. See xnotify.c for
+ * the implementation and an overview of the permission model.
+ */
 #include "include/privates.h"
 #include "dixstruct.h"
 
@@ -29,26 +35,28 @@ typedef struct {
 } xXnotifyQueryVersionReply;
 #define sz_xXnotifyQueryVersionReply 32
 
-#define XNOTIFY_ATTACH          1
-#define XNOTIFY_SELECTION       2
-#define XNOTIFY_COMPOSITE       3
-#define XNOTIFY_SCREEN          4
-#define XNOTIFY_RECORD          5
-#define XNOTIFY_CURSOR          6
-#define XNOTIFY_INPUT_GRAB      7
-#define XNOTIFY_INPUT_INJECT    8
-#define XNOTIFY_HOTKEY          9
-#define XNOTIFY_INPUT           10
-#define XNOTIFY_MANAGE          11
-#define XNOTIFY_GRAB_OVERRIDE   12
-#define XNOTIFY_WARP            13
-#define XNOTIFY_FOCUS           14
-#define XNOTIFY_RANDR           15
-#define XNOTIFY_OVERLAY         16
+/* Action bits: each sensitive capability the guard can allow or deny per client.
+ * Values are 1-based bit positions (permission masks use 1U << (action - 1)). */
+#define XNOTIFY_ATTACH          1   /* attach to shared memory (MIT-SHM) */
+#define XNOTIFY_SELECTION       2   /* own or convert selections (clipboard) */
+#define XNOTIFY_COMPOSITE       3   /* redirect / composite windows */
+#define XNOTIFY_SCREEN          4   /* read screen contents (screenshots, GetImage) */
+#define XNOTIFY_RECORD          5   /* record protocol/input via the RECORD extension */
+#define XNOTIFY_CURSOR          6   /* read or change the cursor image */
+#define XNOTIFY_INPUT_GRAB      7   /* actively grab the keyboard or pointer */
+#define XNOTIFY_INPUT_INJECT    8   /* inject synthetic input (XTEST) */
+#define XNOTIFY_HOTKEY          9   /* register global hotkeys (passive key grabs) */
+#define XNOTIFY_INPUT           10  /* receive input events destined for other windows */
+#define XNOTIFY_MANAGE          11  /* manage other clients' windows (configure, properties) */
+#define XNOTIFY_GRAB_OVERRIDE   12  /* override an existing grab */
+#define XNOTIFY_WARP            13  /* warp (move) the pointer */
+#define XNOTIFY_FOCUS           14  /* change the input focus */
+#define XNOTIFY_RANDR           15  /* change screen configuration (RandR) */
+#define XNOTIFY_OVERLAY         16  /* access the composite overlay window */
 
-#define XNOTIFY_MAX_ACTIONS     16
-#define XNOTIFY_ALL_ACTIONS_MASK ((1U << XNOTIFY_MAX_ACTIONS) - 1)
-#define XNOTIFY_GUARD           17
+#define XNOTIFY_MAX_ACTIONS     16                                /* highest per-client action bit */
+#define XNOTIFY_ALL_ACTIONS_MASK ((1U << XNOTIFY_MAX_ACTIONS) - 1) /* mask of every action */
+#define XNOTIFY_GUARD           17  /* authority to act as the permission manager (guard) */
 
 #define MAX_PERM_ENTRIES        2048
 #define HASH_TABLE_SIZE         512
