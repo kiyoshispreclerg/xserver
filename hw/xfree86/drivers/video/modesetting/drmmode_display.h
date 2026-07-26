@@ -218,6 +218,13 @@ typedef struct {
      * completes. */
     uint32_t present_flip_fb_id;
 
+    /* The window last found flippable on this CRTC by ms_present_check_flip().
+     * Present's flip hook isn't passed the window, so ms_present_flip() reads it
+     * from here per CRTC -- letting several CRTCs flip independent windows at
+     * once (a single global would make concurrent per-CRTC flips fall back to
+     * copy). */
+    WindowPtr present_flip_window;
+
     PixmapPtr prime_pixmap;
     PixmapPtr prime_pixmap_back;
     unsigned prime_pixmap_x;
