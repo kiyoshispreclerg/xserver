@@ -163,15 +163,21 @@ typedef void (*present_priv_abort_vblank_ptr)(ScreenPtr screen,
                                               uint64_t msc);
 typedef void (*present_priv_flip_destroy_ptr)(ScreenPtr screen);
 
-struct present_screen_priv {
-    ScreenPtr                   pScreen;
-    ConfigNotifyProcPtr         ConfigNotify;
-    ClipNotifyProcPtr           ClipNotify;
+/*
+ * Screen-mode page-flip bookkeeping for one output (one CRTC).
+ *
+ * One of these is tracked per CRTC that has ever flipped, linked into
+ * present_screen_priv::flip_states and keyed by ->crtc, so that several CRTCs
+ * can be in independent flip cycles at once. (Until the flip-eligibility gate
+ * is relaxed per-CRTC, only one CRTC ever flips, so exactly one node is live
+ * and behaviour matches the old single-instance state.)
+ */
+struct present_flip_state {
+    struct xorg_list            link;       /* in present_screen_priv::flip_states */
+    RRCrtcPtr                   crtc;       /* the CRTC this state tracks (key) */
 
     present_vblank_ptr          flip_pending;
     uint64_t                    unflip_event_id;
-
-    uint32_t                    fake_interval;
 
     /* Currently active flipped pixmap and fence */
     RRCrtcPtr                   flip_crtc;
@@ -180,6 +186,19 @@ struct present_screen_priv {
     PixmapPtr                   flip_pixmap;
     present_fence_ptr           flip_idle_fence;
     Bool                        flip_sync;
+};
+
+typedef struct present_flip_state *present_flip_state_ptr;
+
+struct present_screen_priv {
+    ScreenPtr                   pScreen;
+    ConfigNotifyProcPtr         ConfigNotify;
+    ClipNotifyProcPtr           ClipNotify;
+
+    uint32_t                    fake_interval;
+
+    /* Screen-mode flip bookkeeping, one node per CRTC (keyed by crtc). */
+    struct xorg_list            flip_states;
 
     present_screen_info_ptr     info;
 
@@ -440,10 +459,10 @@ void
 present_flip_destroy(ScreenPtr screen);
 
 void
-present_restore_screen_pixmap(ScreenPtr screen);
+present_restore_screen_pixmap(ScreenPtr screen, present_flip_state_ptr fs);
 
 void
-present_set_abort_flip(ScreenPtr screen);
+present_set_abort_flip(ScreenPtr screen, present_flip_state_ptr fs);
 
 Bool
 present_init(void);
