@@ -187,6 +187,8 @@ present_screen_priv_init(ScreenPtr screen)
     if (!screen_priv)
         return NULL;
 
+    xorg_list_init(&screen_priv->flip_states);
+
     dixScreenHookWindowDestroy(screen, present_destroy_window);
     dixScreenHookClose(screen, present_close_screen);
 
