@@ -402,6 +402,11 @@ ms_present_check_flip(RRCrtcPtr crtc,
     }
 
     ms->flip_window = window;
+    if (crtc) {
+        xf86CrtcPtr xf86_crtc = crtc->devPrivate;
+        drmmode_crtc_private_ptr drmmode_crtc = xf86_crtc->driver_private;
+        drmmode_crtc->present_flip_window = window;
+    }
 
     return TRUE;
 
@@ -439,12 +444,17 @@ ms_present_flip(RRCrtcPtr crtc,
     ScrnInfoPtr scrn = xf86ScreenToScrn(screen);
     modesettingPtr ms = modesettingPTR(scrn);
     xf86CrtcPtr xf86_crtc = crtc->devPrivate;
+    drmmode_crtc_private_ptr drmmode_crtc = xf86_crtc->driver_private;
+    WindowPtr flip_window = drmmode_crtc->present_flip_window;
     bool ret;
     struct ms_present_vblank_event *event;
 
-    /* A NULL pixmap means this is a fake flip to be routed through TearFree */
+    /* A NULL pixmap means this is a fake flip to be routed through TearFree.
+     * Use this CRTC's own flip window (set by ms_present_check_flip) rather than
+     * a global, so concurrent per-CRTC flips don't clobber each other. */
     if (pixmap &&
-        !ms_present_check_flip(crtc, ms->flip_window, pixmap, sync_flip, NULL))
+        (!flip_window ||
+         !ms_present_check_flip(crtc, flip_window, pixmap, sync_flip, NULL)))
         return FALSE;
 
     event = calloc(1, sizeof(struct ms_present_vblank_event));
@@ -484,7 +494,7 @@ ms_present_flip(RRCrtcPtr crtc,
      * variable refresh supported can be enabled on every CRTC.
      */
     if (ms->vrr_support && ms->is_connector_vrr_capable &&
-          ms_window_has_variable_refresh(ms, ms->flip_window)) {
+          ms_window_has_variable_refresh(ms, flip_window)) {
         ms_present_set_screen_vrr(scrn, TRUE);
     }
 
