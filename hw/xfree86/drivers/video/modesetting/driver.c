@@ -757,10 +757,13 @@ ms_tearfree_do_flips(ScreenPtr pScreen)
         }
 
         /* Skip if the last flip is still pending, a DRI client is flipping, or
-         * there isn't any damage on the front buffer.
+         * there isn't any damage on the front buffer. Also skip a CRTC whose
+         * scanout is currently owned by Present: the whole screen for a
+         * whole-screen flip (present_flipping), or just this CRTC for a
+         * per-CRTC flip (present_flip_fb_id).
          */
         if (trf->flip_seq || ms->drmmode.dri2_flipping ||
-            ms->drmmode.present_flipping ||
+            ms->drmmode.present_flipping || drmmode_crtc->present_flip_fb_id ||
             RegionNil(&trf->buf[trf->back_idx ^ 1].dmg))
             continue;
 

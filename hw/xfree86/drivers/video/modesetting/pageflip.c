@@ -111,6 +111,11 @@ struct ms_crtc_pageflip {
     struct ms_flipdata *flipdata;
     struct xorg_list node;
     uint32_t tearfree_seq;
+    /* Per-CRTC framebuffer this CRTC is leaving, to be released once this flip
+     * completes (0 if the CRTC was on the shared screen framebuffer). This is
+     * how a per-CRTC scanout buffer is freed one flip after it stops being
+     * shown, both for per-CRTC -> per-CRTC and per-CRTC -> whole-screen. */
+    uint32_t old_crtc_fb_id;
 };
 
 /**
@@ -157,6 +162,12 @@ ms_pageflip_handler(uint64_t msc, uint64_t ust, void *data)
         if (flipdata->old_fb_id)
             drmModeRmFB(ms->fd, flipdata->old_fb_id);
     }
+
+    /* This CRTC has now completed its move off its previous per-CRTC fb; the
+     * new buffer is being scanned out, so the old one can be released. */
+    if (flip->old_crtc_fb_id)
+        drmModeRmFB(ms->fd, flip->old_crtc_fb_id);
+
     ms_pageflip_free(flip);
 }
 
@@ -217,10 +228,11 @@ enum queue_flip_status {
 static int
 queue_flip_on_crtc(ScreenPtr screen, xf86CrtcPtr crtc,
                    struct ms_flipdata *flipdata,
-                   xf86CrtcPtr ref_crtc, uint32_t flags)
+                   xf86CrtcPtr ref_crtc, uint32_t flags,
+                   uint32_t fb_id, int x, int y,
+                   uint32_t new_present_fb_id)
 {
-    ScrnInfoPtr scrn = xf86ScreenToScrn(screen);
-    modesettingPtr ms = modesettingPTR(scrn);
+    drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
     struct ms_crtc_pageflip *flip;
     uint32_t seq;
 
@@ -234,6 +246,9 @@ queue_flip_on_crtc(ScreenPtr screen, xf86CrtcPtr crtc,
      */
     flip->on_reference_crtc = crtc == ref_crtc;
     flip->flipdata = flipdata;
+    /* Once this flip completes, release the per-CRTC fb this CRTC is leaving
+     * (0 if it was on the shared screen fb -- nothing of ours to release). */
+    flip->old_crtc_fb_id = drmmode_crtc->present_flip_fb_id;
 
     seq = ms_drm_queue_alloc(crtc, flip, ms_pageflip_handler, ms_pageflip_abort);
     if (!seq) {
@@ -244,11 +259,13 @@ queue_flip_on_crtc(ScreenPtr screen, xf86CrtcPtr crtc,
     /* take a reference on flipdata for use in flip */
     flipdata->flip_count++;
 
-    if (do_queue_flip_on_crtc(screen, crtc, flags, seq, ms->drmmode.fb_id,
-                              crtc->x, crtc->y))
+    if (do_queue_flip_on_crtc(screen, crtc, flags, seq, fb_id, x, y))
         return QUEUE_FLIP_DRM_FLUSH_FAILED;
 
-    /* The page flip succeeded. */
+    /* The page flip succeeded; this CRTC now scans out new_present_fb_id
+     * (0 for the shared screen framebuffer). */
+    drmmode_crtc->present_flip_fb_id = new_present_fb_id;
+
     return QUEUE_FLIP_SUCCESS;
 }
 
@@ -500,7 +517,9 @@ ms_do_pageflip(ScreenPtr screen,
             flags |= DRM_MODE_PAGE_FLIP_ASYNC;
 
         flip_status = queue_flip_on_crtc(screen, crtc, flipdata,
-                                         ref_crtc, flags);
+                                         ref_crtc, flags,
+                                         ms->drmmode.fb_id, crtc->x, crtc->y,
+                                         /* going to the shared screen fb */ 0);
 
         switch (flip_status) {
             case QUEUE_FLIP_ALLOC_FAILED:
@@ -558,6 +577,128 @@ error_out:
 
 error_free_event:
     /* Free the event since the caller has no way to know it's safe to free */
+    free(event);
+    return FALSE;
+}
+
+/*
+ * Page-flip a single CRTC-sized pixmap to one CRTC.
+ *
+ * Unlike ms_do_pageflip(), which imports one whole-screen buffer and flips it
+ * to every enabled CRTC at that CRTC's offset into the shared framebuffer, this
+ * imports the given pixmap as its own DRM framebuffer and flips only 'crtc' to
+ * it, reading from the framebuffer's own origin (0,0). The other CRTCs are left
+ * untouched, so several CRTCs can be in independent flip cycles at once.
+ *
+ * The CRTC's previous per-CRTC framebuffer (if any) is released once this flip
+ * completes; if the CRTC was on the shared screen framebuffer, nothing of ours
+ * is released (that buffer stays owned by drmmode).
+ */
+Bool
+ms_do_pageflip_crtc(ScreenPtr screen,
+                    PixmapPtr new_front,
+                    void *event,
+                    xf86CrtcPtr crtc,
+                    Bool async,
+                    ms_pageflip_handler_proc pageflip_handler,
+                    ms_pageflip_abort_proc pageflip_abort,
+                    const char *log_prefix)
+{
+    ScrnInfoPtr scrn = xf86ScreenToScrn(screen);
+    modesettingPtr ms = modesettingPTR(scrn);
+    struct gbm_bo *new_front_bo;
+    struct ms_flipdata *flipdata;
+    enum queue_flip_status flip_status;
+    uint32_t new_fb_id = 0;
+    uint32_t flags;
+
+    if (!xf86_crtc_on(crtc))
+        goto error_free_event;
+
+    ms->glamor.block_handler(screen);
+
+    new_front_bo = ms->glamor.gbm_bo_from_pixmap(screen, new_front);
+    if (!new_front_bo) {
+        xf86DrvMsg(scrn->scrnIndex, X_ERROR,
+                   "%s: Failed to get GBM BO for per-CRTC flip.\n", log_prefix);
+        goto error_free_event;
+    }
+
+    flipdata = calloc(1, sizeof(*flipdata));
+    if (!flipdata) {
+        gbm_bo_destroy(new_front_bo);
+        xf86DrvMsg(scrn->scrnIndex, X_ERROR,
+                   "%s: Failed to allocate flipdata.\n", log_prefix);
+        goto error_free_event;
+    }
+
+    flipdata->event = event;
+    flipdata->screen = screen;
+    flipdata->event_handler = pageflip_handler;
+    flipdata->abort_handler = pageflip_abort;
+
+    /* Local reference, as in ms_do_pageflip(): if queuing fails synchronously,
+     * the abort path drops its reference; keep ours so flipdata survives here. */
+    flipdata->flip_count++;
+
+    /* Import the CRTC-sized pixmap as its own framebuffer. The previous per-CRTC
+     * fb this CRTC is leaving is released by queue_flip_on_crtc() bookkeeping
+     * once the flip completes. */
+    if (drmmode_bo_import(&ms->drmmode, new_front_bo, &new_fb_id)) {
+        xf86DrvMsg(scrn->scrnIndex, X_WARNING,
+                   "%s: Import BO for per-CRTC flip failed: %s\n",
+                   log_prefix, strerror(errno));
+        goto error_out;
+    }
+
+    flags = DRM_MODE_PAGE_FLIP_EVENT;
+    if (ms->drmmode.can_async_flip && async)
+        flags |= DRM_MODE_PAGE_FLIP_ASYNC;
+
+    /* Flip just this CRTC to its own fb, read from the fb origin (0,0). This
+     * CRTC is its own reference CRTC for timing/completion. On success the CRTC
+     * starts scanning out new_fb_id and its previous per-CRTC fb is released
+     * when this flip completes. */
+    flip_status = queue_flip_on_crtc(screen, crtc, flipdata, crtc, flags,
+                                     new_fb_id, 0, 0, new_fb_id);
+    switch (flip_status) {
+    case QUEUE_FLIP_ALLOC_FAILED:
+        xf86DrvMsg(scrn->scrnIndex, X_WARNING,
+                   "%s: carrier alloc for per-CRTC flip failed.\n", log_prefix);
+        goto error_undo;
+    case QUEUE_FLIP_QUEUE_ALLOC_FAILED:
+        xf86DrvMsg(scrn->scrnIndex, X_WARNING,
+                   "%s: entry alloc for per-CRTC flip failed.\n", log_prefix);
+        goto error_undo;
+    case QUEUE_FLIP_DRM_FLUSH_FAILED:
+        ms_print_pageflip_error(scrn->scrnIndex, log_prefix, 0, flags, errno);
+        goto error_undo;
+    case QUEUE_FLIP_SUCCESS:
+        break;
+    }
+
+    gbm_bo_destroy(new_front_bo);
+
+    /* Drop our local reference; the queued flip holds the rest until it
+     * completes (or aborts), when flipdata and old_fb_id are released. */
+    flipdata->flip_count--;
+    return TRUE;
+
+error_undo:
+    /* Nothing was successfully queued: drop the fb we just imported. */
+    if (flipdata->flip_count == 1)
+        drmModeRmFB(ms->fd, new_fb_id);
+
+error_out:
+    gbm_bo_destroy(new_front_bo);
+    if (flipdata->flip_count == 1)
+        free(flipdata);
+    else {
+        flipdata->flip_count--;
+        return FALSE;
+    }
+
+error_free_event:
     free(event);
     return FALSE;
 }

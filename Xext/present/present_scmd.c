@@ -176,6 +176,23 @@ present_region_is_box(RegionPtr region, BoxPtr box)
            present_box_equal(RegionExtents(region), box);
 }
 
+/*
+ * A per-CRTC flip pixmap covers a single CRTC, so it is smaller than the whole
+ * screen; a whole-screen flip pixmap matches the screen pixmap. Unlike a
+ * whole-screen flip, a per-CRTC flip only redirects one CRTC's scanout -- it
+ * does not replace the screen pixmap or the window-tree pixmaps -- so the code
+ * that swaps/restores those must be skipped for it.
+ */
+static Bool
+present_flip_is_per_crtc(ScreenPtr screen, PixmapPtr pixmap)
+{
+    PixmapPtr screen_pixmap = (*screen->GetScreenPixmap)(screen);
+
+    return pixmap &&
+           (pixmap->drawable.width != screen_pixmap->drawable.width ||
+            pixmap->drawable.height != screen_pixmap->drawable.height);
+}
+
 static Bool
 present_check_flip(RRCrtcPtr            crtc,
                    WindowPtr            window,
@@ -230,6 +247,9 @@ present_check_flip(RRCrtcPtr            crtc,
             if (!reason || tmp_reason != PRESENT_FLIP_REASON_BUFFER_FORMAT) {
                 if (reason)
                     *reason = tmp_reason;
+                PresentFlipDebug("reject win 0x%08lx: driver check_flip2 said no "
+                                 "(reason %d)\n",
+                                 (unsigned long) window->drawable.id, tmp_reason);
                 return FALSE;
             }
         }
@@ -303,19 +323,26 @@ present_check_flip(RRCrtcPtr            crtc,
         }
     }
 
-    /* The window and its source pixmap must exactly cover the flip target */
+    /*
+     * The window and its source pixmap must exactly cover the flip target. For
+     * a whole-screen flip the pixmap represents the screen, so its screen-space
+     * origin (pixmap->screen_x/y) must match the window at (0,0). A per-CRTC
+     * flip reads a standalone CRTC-sized buffer from its own origin (0,0), so
+     * pixmap->screen_x/y do not track the window position and are not compared.
+     */
     if (window->drawable.x != target_x || window->drawable.y != target_y ||
-        window->drawable.x != pixmap->screen_x || window->drawable.y != pixmap->screen_y ||
+        (!per_crtc && (window->drawable.x != pixmap->screen_x ||
+                       window->drawable.y != pixmap->screen_y)) ||
         window->drawable.width != pixmap->drawable.width ||
         window->drawable.height != pixmap->drawable.height) {
         PresentFlipDebug("reject win 0x%08lx: window/pixmap geometry mismatch "
-                         "(win @%d,%d %dx%d vs pixmap @%d,%d %dx%d, target origin %d,%d)\n",
+                         "(win @%d,%d %dx%d vs pixmap @%d,%d %dx%d, target origin %d,%d, %s)\n",
                          (unsigned long) window->drawable.id,
                          window->drawable.x, window->drawable.y,
                          window->drawable.width, window->drawable.height,
                          pixmap->screen_x, pixmap->screen_y,
                          pixmap->drawable.width, pixmap->drawable.height,
-                         target_x, target_y);
+                         target_x, target_y, per_crtc ? "per-CRTC" : "whole-screen");
         return FALSE;
     }
 
@@ -479,6 +506,15 @@ present_restore_screen_pixmap(ScreenPtr screen, present_flip_state_ptr fs)
     }
 
     assert (flip_pixmap);
+
+    /* A per-CRTC flip never replaced the screen pixmap or the window-tree
+     * pixmaps (it only redirected one CRTC's scanout), so there is nothing to
+     * restore here; the driver flips that CRTC back to the shared framebuffer
+     * on unflip. Copying the CRTC-sized pixmap into the screen pixmap here would
+     * scribble it onto the wrong screen region (e.g. a second CRTC's content
+     * onto the top-left of the screen). */
+    if (present_flip_is_per_crtc(screen, flip_pixmap))
+        return;
 
     /* Update the screen pixmap with the current flip pixmap contents
      * Only do this the first time for a particular unflip operation, or
@@ -781,16 +817,24 @@ present_execute(present_vblank_ptr vblank, uint64_t ust, uint64_t crtc_msc)
             if (present_flip(vblank->crtc, vblank->event_id, vblank->target_msc, vblank->pixmap, vblank->sync_flip)) {
                 RegionPtr damage;
 
-                /* Fix window pixmaps:
+                /* Fix window pixmaps for a whole-screen flip:
                  *  1) Restore previous flip window pixmap
                  *  2) Set current flip window pixmap to the new pixmap
+                 *
+                 * A per-CRTC flip only redirects one CRTC's scanout; it must
+                 * not touch the screen or window-tree pixmaps (which are
+                 * whole-screen), or it would misdirect 2D rendering for the
+                 * rest of the screen. Its content lives entirely in the flipped
+                 * buffer and is refreshed by the client re-presenting.
                  */
-                if (fs->flip_window && fs->flip_window != window)
-                    present_set_tree_pixmap(fs->flip_window,
-                                            fs->flip_pixmap,
-                                            (*screen->GetScreenPixmap)(screen));
-                present_set_tree_pixmap(vblank->window, NULL, vblank->pixmap);
-                present_set_tree_pixmap(screen->root, NULL, vblank->pixmap);
+                if (!present_flip_is_per_crtc(screen, vblank->pixmap)) {
+                    if (fs->flip_window && fs->flip_window != window)
+                        present_set_tree_pixmap(fs->flip_window,
+                                                fs->flip_pixmap,
+                                                (*screen->GetScreenPixmap)(screen));
+                    present_set_tree_pixmap(vblank->window, NULL, vblank->pixmap);
+                    present_set_tree_pixmap(screen->root, NULL, vblank->pixmap);
+                }
 
                 /* Report update region as damaged
                  */
