@@ -131,7 +131,7 @@ typedef void (*present_unflip_ptr) (ScreenPtr screen,
  */
 typedef void (*present_wnmd_flips_stop_ptr) (WindowPtr window);
 
-#define PRESENT_SCREEN_INFO_VERSION        1
+#define PRESENT_SCREEN_INFO_VERSION        2
 
 typedef struct present_screen_info {
     uint32_t                            version;
@@ -146,6 +146,16 @@ typedef struct present_screen_info {
     present_flip_ptr                    flip;
     present_unflip_ptr                  unflip;
     present_check_flip2_ptr             check_flip2;
+
+    /* Version >= 2.
+     *
+     * When TRUE, the driver's flip/unflip path can page-flip a pixmap that
+     * covers exactly one CRTC's scanout rectangle to that single CRTC (instead
+     * of only a whole-screen buffer flipped to every CRTC at once). Present
+     * only offers per-CRTC flips to drivers that set this; others keep getting
+     * whole-screen flips and per-CRTC requests fall back to a copy.
+     */
+    Bool                                capable_flip_crtc;
 
 } present_screen_info_rec, *present_screen_info_ptr;
 
