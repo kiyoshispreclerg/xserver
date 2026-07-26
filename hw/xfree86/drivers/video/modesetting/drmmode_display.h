@@ -211,6 +211,13 @@ typedef struct {
     unsigned rotate_fb_id;
     drmmode_tearfree_rec tearfree;
 
+    /* When Present page-flips a single CRTC-sized buffer to this CRTC (rather
+     * than a whole-screen buffer flipped to all CRTCs), this holds the DRM fb
+     * currently scanned out that way, or 0 when the CRTC is on the shared
+     * screen framebuffer. Released when the next flip/unflip on this CRTC
+     * completes. */
+    uint32_t present_flip_fb_id;
+
     PixmapPtr prime_pixmap;
     PixmapPtr prime_pixmap_back;
     unsigned prime_pixmap_x;

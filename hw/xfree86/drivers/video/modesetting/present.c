@@ -228,6 +228,21 @@ ms_present_flip_abort(modesettingPtr ms, void *data)
 }
 
 /*
+ * A per-CRTC flip presents a buffer covering exactly one CRTC rather than the
+ * whole screen. We detect that by the pixmap being a different size than the
+ * screen pixmap (for a single-CRTC-== -screen setup they match and the
+ * whole-screen path is used, which is correct).
+ */
+static Bool
+ms_flip_is_per_crtc(ScreenPtr screen, PixmapPtr pixmap)
+{
+    PixmapPtr screen_pixmap = screen->GetScreenPixmap(screen);
+
+    return pixmap->drawable.width != screen_pixmap->drawable.width ||
+           pixmap->drawable.height != screen_pixmap->drawable.height;
+}
+
+/*
  * Test to see if page flipping is possible on the target crtc
  *
  * We ignore sw-cursors when *disabling* flipping, we may very well be
@@ -275,11 +290,16 @@ ms_present_check_unflip(RRCrtcPtr crtc,
 
     /*
      * Check stride, can't change that reliably on flip on some drivers, unless
-     * the kms driver is atomic_modeset_capable.
+     * the kms driver is atomic_modeset_capable. A per-CRTC flip switches to a
+     * framebuffer of the CRTC's own size (a different stride than the shared
+     * screen framebuffer by design), which is only reliable under atomic KMS.
      */
-    if (!ms->atomic_modeset_capable &&
-        pixmap->devKind != gbm_bo_get_stride(ms->drmmode.front_bo))
-        return FALSE;
+    if (!ms->atomic_modeset_capable) {
+        if (ms_flip_is_per_crtc(screen, pixmap))
+            return FALSE;
+        if (pixmap->devKind != gbm_bo_get_stride(ms->drmmode.front_bo))
+            return FALSE;
+    }
 
     if (!ms->drmmode.glamor)
         return FALSE;
@@ -323,6 +343,8 @@ ms_present_check_flip(RRCrtcPtr crtc,
     ScrnInfoPtr scrn = xf86ScreenToScrn(screen);
     modesettingPtr ms = modesettingPTR(scrn);
     bool async_flip = !sync_flip;
+    Bool per_crtc = crtc && ms_flip_is_per_crtc(screen, pixmap);
+    int target_x = 0, target_y = 0;
 
     if (reason)
         *reason = PRESENT_FLIP_REASON_UNKNOWN;
@@ -341,11 +363,22 @@ ms_present_check_flip(RRCrtcPtr crtc,
      * because we need to be able to give info
      * about tearfree, even if we can't flip.
      *
+     * A whole-screen flip covers the root from (0,0); a per-CRTC flip covers
+     * exactly the target CRTC, so the window sits at that CRTC's origin.
+     *
      * See: https://github.com/X11Libre/xserver/issues/1812
      * See: https://github.com/X11Libre/xserver/issues/1754
      */
-    if (window->drawable.x != 0 || window->drawable.y != 0 ||
-        window->drawable.x != pixmap->screen_x || window->drawable.y != pixmap->screen_y ||
+    if (per_crtc) {
+        xf86CrtcPtr xf86_crtc = crtc->devPrivate;
+        target_x = xf86_crtc->bounds.x1;
+        target_y = xf86_crtc->bounds.y1;
+    }
+    /* A per-CRTC flip reads a standalone CRTC-sized buffer from its own origin,
+     * so pixmap->screen_x/y don't track the window position and aren't compared. */
+    if (window->drawable.x != target_x || window->drawable.y != target_y ||
+        (!per_crtc && (window->drawable.x != pixmap->screen_x ||
+                       window->drawable.y != pixmap->screen_y)) ||
         window->drawable.width != pixmap->drawable.width ||
         window->drawable.height != pixmap->drawable.height) {
         goto no_flip;
@@ -429,6 +462,20 @@ ms_present_flip(RRCrtcPtr crtc,
         return ms_do_pageflip(screen, NULL, event, xf86_crtc, FALSE,
                               ms_present_flip_handler, ms_present_flip_abort,
                               "Present-TearFree-flip");
+
+    /* A per-CRTC flip presents a CRTC-sized buffer to this one CRTC only,
+     * leaving the other CRTCs untouched. A whole-screen flip presents a
+     * screen-sized buffer to every CRTC at once.
+     *
+     * Note: the global present_flipping (whole-screen ownership of scanout) is
+     * deliberately not set here. Per-CRTC ownership is tracked per CRTC by
+     * drmmode_crtc->present_flip_fb_id, so TearFree/dirty updates keep running
+     * on the other CRTCs while this one is flipped. */
+    if (ms_flip_is_per_crtc(screen, pixmap)) {
+        return ms_do_pageflip_crtc(screen, pixmap, event, xf86_crtc, !sync_flip,
+                                   ms_present_flip_handler, ms_present_flip_abort,
+                                   "Present-flip-crtc");
+    }
 
     /* A window can only flip if it covers the entire X screen.
      * Only one window can flip at a time.
@@ -547,6 +594,14 @@ ms_present_screen_init(ScreenPtr screen)
         info.capabilities |= PresentCapabilityAsync;
         ms->drmmode.can_async_flip = TRUE;
         xf86DrvMsg(screen->myNum, X_INFO, "Async flip capable\n");
+    }
+
+    /* Per-CRTC page flips switch a CRTC to a framebuffer of its own size (a
+     * different stride than the shared screen framebuffer), which is only
+     * reliable under atomic KMS. */
+    if (ms->atomic_modeset_capable) {
+        info.capable_flip_crtc = TRUE;
+        xf86DrvMsg(screen->myNum, X_INFO, "Per-CRTC page flip capable\n");
     }
 
     return present_screen_init(screen, &info);
