@@ -183,11 +183,14 @@ present_get_image(DrawablePtr pDrawable, int sx, int sy, int w, int h,
     present_screen_priv_ptr screen_priv = present_screen_priv(screen);
 
     PRESENT_UNWRAP_HOOK(screen_priv, screen, GetImage);
-    (*screen->GetImage)(pDrawable, sx, sy, w, h, format, planeMask, pdstLine);
-    /* Substitute in any per-CRTC flipped content the read would have missed.
-     * Done while unwrapped so its flip-pixmap reads use the original GetImage. */
-    present_flip_overlay_image(pDrawable, sx, sy, w, h, format, planeMask,
-                               pdstLine);
+    /* If a per-CRTC flip overlaps this root capture, read the non-flipped
+     * remainder from the screen pixmap and stitch the flipped regions in from
+     * the flip buffers -- without reading the flipped area twice. Otherwise
+     * (the common case) fall back to a plain full read. Done while unwrapped so
+     * the underlying reads use the original GetImage. */
+    if (!present_flip_getimage(pDrawable, sx, sy, w, h, format, planeMask,
+                               pdstLine))
+        (*screen->GetImage)(pDrawable, sx, sy, w, h, format, planeMask, pdstLine);
     PRESENT_WRAP_HOOK(screen_priv, screen, GetImage, present_get_image);
 }
 
