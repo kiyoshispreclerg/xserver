@@ -196,6 +196,64 @@ present_flip_is_per_crtc(ScreenPtr screen, PixmapPtr pixmap)
 }
 
 /*
+ * Read the 'sw'x'sh' rectangle at (src_sx,src_sy) of drawable 'src' via the
+ * (already-unwrapped) real GetImage and place it into the ZPixmap result buffer
+ * 'pdstLine' at column 'dx', row 'dy' (offsets within a 'w'-wide, 'dst_stride'-
+ * strided result). When the rectangle spans the full result width the rows line
+ * up and it reads straight in; otherwise it stages through a temp and copies
+ * each row into its sub-rectangle.
+ */
+static void
+present_read_into_result(ScreenPtr screen, DrawablePtr src,
+                         int src_sx, int src_sy, int sw, int sh,
+                         int dx, int dy, int w,
+                         int depth, int bpp8, int dst_stride,
+                         unsigned int format, unsigned long planeMask,
+                         char *pdstLine)
+{
+    int     tmp_stride, r;
+    char   *tmp;
+
+    if (dx == 0 && sw == w) {
+        (*screen->GetImage)(src, src_sx, src_sy, sw, sh, format, planeMask,
+                            pdstLine + (size_t) dy * dst_stride);
+        return;
+    }
+
+    tmp_stride = PixmapBytePad(sw, depth);
+    tmp = malloc((size_t) tmp_stride * sh);
+    if (!tmp)
+        return;
+
+    (*screen->GetImage)(src, src_sx, src_sy, sw, sh, format, planeMask, tmp);
+
+    for (r = 0; r < sh; r++)
+        memcpy(pdstLine + (size_t)(dy + r) * dst_stride + (size_t) dx * bpp8,
+               tmp + (size_t) r * tmp_stride,
+               (size_t) sw * bpp8);
+
+    free(tmp);
+}
+
+/*
+ * Is 'fs' a per-CRTC flip whose displayed content present_flip_overlay_image
+ * will substitute into a root capture of the given pixel format? If so, fill
+ * 'box' with its (desktop-space) CRTC rectangle. Used both to punch flipped
+ * regions out of the screen-pixmap read and to drive the substitution, so the
+ * two stay exactly in sync (every punched pixel is refilled, and vice versa).
+ */
+static Bool
+present_flip_overlay_valid(present_flip_state_ptr fs, int depth, int bpp,
+                           BoxPtr box)
+{
+    PixmapPtr fp = fs->flip_pixmap;
+
+    return fp && fs->crtc && present_crtc_box(fs->crtc, box) &&
+           fp->drawable.depth == depth &&
+           fp->drawable.bitsPerPixel == bpp;
+}
+
+/*
  * When a per-CRTC flip is active, that CRTC scans out the flip pixmap, not the
  * screen pixmap -- so a root GetImage (as used by XGetImage/XShmGetImage screen
  * recorders) reads stale content for that region. Substitute the flipped
@@ -241,17 +299,10 @@ present_flip_overlay_image(DrawablePtr pDrawable, int sx, int sy, int w, int h,
     dst_stride = PixmapBytePad(w, depth);
 
     xorg_list_for_each_entry(fs, &screen_priv->flip_states, link) {
-        PixmapPtr   fp = fs->flip_pixmap;
         BoxRec      box;
-        int         ix0, iy0, ix1, iy1, sw, sh, tmp_stride, r;
-        char       *tmp;
+        int         ix0, iy0, ix1, iy1, sw, sh;
 
-        if (!fp || !fs->crtc || !present_crtc_box(fs->crtc, &box))
-            continue;
-
-        /* Byte layout must match for the row copy below. */
-        if (fp->drawable.depth != depth ||
-            fp->drawable.bitsPerPixel != pDrawable->bitsPerPixel)
+        if (!present_flip_overlay_valid(fs, depth, pDrawable->bitsPerPixel, &box))
             continue;
 
         /* Intersect the requested region with this CRTC's rectangle. */
@@ -265,36 +316,117 @@ present_flip_overlay_image(DrawablePtr pDrawable, int sx, int sy, int w, int h,
         sw = ix1 - ix0;
         sh = iy1 - iy0;
 
-        /* Fast path: the overlap spans the full result width (e.g. a recorder
-         * capturing exactly this one output), so the flip pixmap's rows line up
-         * with the result buffer's rows -- read straight into it, no copy. The
-         * flip pixmap's origin is the CRTC origin, so shift by its top-left. */
-        if (ix0 - req_x0 == 0 && sw == w) {
-            (*screen->GetImage)(&fp->drawable, ix0 - box.x1, iy0 - box.y1, sw, sh,
-                                format, planeMask,
-                                pdstLine + (size_t)(iy0 - req_y0) * dst_stride);
-            continue;
-        }
-
-        /* General case (overlap narrower than the result, e.g. side-by-side
-         * CRTCs in a whole-root capture): read into a temp then copy the rows
-         * into their sub-rectangle of the result buffer. */
-        tmp_stride = PixmapBytePad(sw, depth);
-        tmp = malloc((size_t) tmp_stride * sh);
-        if (!tmp)
-            continue;
-
-        (*screen->GetImage)(&fp->drawable, ix0 - box.x1, iy0 - box.y1, sw, sh,
-                            format, planeMask, tmp);
-
-        for (r = 0; r < sh; r++)
-            memcpy(pdstLine + (size_t)(iy0 - req_y0 + r) * dst_stride
-                            + (size_t)(ix0 - req_x0) * bpp8,
-                   tmp + (size_t) r * tmp_stride,
-                   (size_t) sw * bpp8);
-
-        free(tmp);
+        /* The flip pixmap's origin is the CRTC origin, so shift the read by the
+         * CRTC's top-left; place it at the overlap's offset in the result. */
+        present_read_into_result(screen, &fs->flip_pixmap->drawable,
+                                 ix0 - box.x1, iy0 - box.y1, sw, sh,
+                                 ix0 - req_x0, iy0 - req_y0, w,
+                                 depth, bpp8, dst_stride,
+                                 format, planeMask, pdstLine);
     }
+}
+
+/*
+ * Root-capture GetImage that avoids reading the screen pixmap for regions that
+ * are page-flipped per CRTC (which present_flip_overlay_image would only
+ * overwrite anyway -- a redundant, ~2x GPU readback while recording). Reads the
+ * screen pixmap for just the non-flipped remainder, then substitutes the
+ * flipped regions from the flip buffers.
+ *
+ * Returns TRUE if it handled the read (a root ZPixmap capture with at least one
+ * overlapping per-CRTC flip). Returns FALSE -- unchanged behaviour -- for any
+ * other read, so the caller does a plain full GetImage.
+ */
+Bool
+present_flip_getimage(DrawablePtr pDrawable, int sx, int sy, int w, int h,
+                      unsigned int format, unsigned long planeMask,
+                      char *pdstLine)
+{
+    ScreenPtr                   screen = pDrawable->pScreen;
+    present_screen_priv_ptr     screen_priv = present_screen_priv(screen);
+    present_flip_state_ptr      fs;
+    int                         depth, bpp8, dst_stride;
+    int                         req_x0, req_y0, req_x1, req_y1;
+    RegionRec                   remaining;
+    BoxRec                      req_box;
+    BoxPtr                      rects;
+    Bool                        any = FALSE;
+    int                         nrects, i;
+
+    if (!screen_priv)
+        return FALSE;
+    if (pDrawable->type != DRAWABLE_WINDOW ||
+        (WindowPtr) pDrawable != screen->root)
+        return FALSE;
+    if (format != ZPixmap)
+        return FALSE;
+    depth = pDrawable->depth;
+    if (pDrawable->bitsPerPixel % 8)
+        return FALSE;
+    bpp8 = pDrawable->bitsPerPixel / 8;
+
+    req_x0 = pDrawable->x + sx;
+    req_y0 = pDrawable->y + sy;
+    req_x1 = req_x0 + w;
+    req_y1 = req_y0 + h;
+    dst_stride = PixmapBytePad(w, depth);
+
+    req_box.x1 = req_x0;
+    req_box.y1 = req_y0;
+    req_box.x2 = req_x1;
+    req_box.y2 = req_y1;
+    RegionInit(&remaining, &req_box, 1);
+
+    /* Punch each flipped CRTC rectangle out of what we'll read from the screen
+     * pixmap. Only flips present_flip_overlay_image will refill are punched
+     * (same predicate), so every punched pixel is guaranteed to be restored. */
+    xorg_list_for_each_entry(fs, &screen_priv->flip_states, link) {
+        BoxRec      box;
+        RegionRec   r;
+
+        if (!present_flip_overlay_valid(fs, depth, pDrawable->bitsPerPixel, &box))
+            continue;
+
+        /* Clip to the requested rect before subtracting. */
+        if (box.x1 < req_x0) box.x1 = req_x0;
+        if (box.y1 < req_y0) box.y1 = req_y0;
+        if (box.x2 > req_x1) box.x2 = req_x1;
+        if (box.y2 > req_y1) box.y2 = req_y1;
+        if (box.x1 >= box.x2 || box.y1 >= box.y2)
+            continue;
+
+        RegionInit(&r, &box, 1);
+        RegionSubtract(&remaining, &remaining, &r);
+        RegionUninit(&r);
+        any = TRUE;
+    }
+
+    if (!any) {
+        /* No per-CRTC flip overlaps this read: leave it to the caller's plain
+         * full GetImage (identical to the pre-optimization behaviour). */
+        RegionUninit(&remaining);
+        return FALSE;
+    }
+
+    /* Read the non-flipped remainder straight from the screen pixmap. */
+    nrects = RegionNumRects(&remaining);
+    rects = RegionRects(&remaining);
+    for (i = 0; i < nrects; i++) {
+        BoxPtr b = &rects[i];
+
+        present_read_into_result(screen, pDrawable,
+                                 b->x1 - pDrawable->x, b->y1 - pDrawable->y,
+                                 b->x2 - b->x1, b->y2 - b->y1,
+                                 b->x1 - req_x0, b->y1 - req_y0, w,
+                                 depth, bpp8, dst_stride,
+                                 format, planeMask, pdstLine);
+    }
+    RegionUninit(&remaining);
+
+    /* Fill the flipped regions from the flip buffers. */
+    present_flip_overlay_image(pDrawable, sx, sy, w, h, format, planeMask,
+                               pdstLine);
+    return TRUE;
 }
 
 static Bool
