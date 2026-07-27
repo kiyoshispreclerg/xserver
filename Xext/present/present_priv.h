@@ -471,6 +471,15 @@ present_flip_overlay_image(DrawablePtr pDrawable, int sx, int sy, int w, int h,
                            unsigned int format, unsigned long planeMask,
                            char *pdstLine);
 
+/* Root-capture GetImage that skips reading the screen pixmap for regions that
+ * are page-flipped per CRTC (avoiding a redundant readback), then substitutes
+ * the flipped content. Returns TRUE if it handled the read; FALSE means the
+ * caller should do a plain full GetImage. 'screen->GetImage' must be unwrapped. */
+Bool
+present_flip_getimage(DrawablePtr pDrawable, int sx, int sy, int w, int h,
+                      unsigned int format, unsigned long planeMask,
+                      char *pdstLine);
+
 void
 present_set_abort_flip(ScreenPtr screen, present_flip_state_ptr fs);
 
