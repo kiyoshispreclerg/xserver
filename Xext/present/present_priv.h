@@ -194,6 +194,7 @@ struct present_screen_priv {
     ScreenPtr                   pScreen;
     ConfigNotifyProcPtr         ConfigNotify;
     ClipNotifyProcPtr           ClipNotify;
+    GetImageProcPtr             GetImage;
 
     uint32_t                    fake_interval;
 
@@ -460,6 +461,15 @@ present_flip_destroy(ScreenPtr screen);
 
 void
 present_restore_screen_pixmap(ScreenPtr screen, present_flip_state_ptr fs);
+
+/* Overlay the currently page-flipped per-CRTC content into a root GetImage
+ * result, so screen capture (XGetImage/XShmGetImage) sees what is actually on
+ * scanout rather than the (stale) screen pixmap. 'screen->GetImage' must be the
+ * unwrapped original when this is called. */
+void
+present_flip_overlay_image(DrawablePtr pDrawable, int sx, int sy, int w, int h,
+                           unsigned int format, unsigned long planeMask,
+                           char *pdstLine);
 
 void
 present_set_abort_flip(ScreenPtr screen, present_flip_state_ptr fs);
