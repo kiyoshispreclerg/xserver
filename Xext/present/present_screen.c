@@ -64,6 +64,8 @@ static void present_close_screen(CallbackListPtr *pcbl, ScreenPtr screen, void *
     if (screen_priv->flip_destroy)
         screen_priv->flip_destroy(screen);
 
+    unwrap(screen_priv, screen, GetImage);
+
     dixScreenUnhookClose(screen, present_close_screen);
     dixSetPrivate(&screen->devPrivates, &present_screen_private_key, NULL);
     free(screen_priv);
@@ -156,6 +158,27 @@ present_clip_notify(WindowPtr window, int dx, int dy)
     wrap(screen_priv, screen, ClipNotify, present_clip_notify);
 }
 
+/*
+ * Hook GetImage so a root screen capture (XGetImage/XShmGetImage) sees content
+ * that is currently page-flipped per CRTC -- which lives in the flip buffers,
+ * not the screen pixmap the default GetImage reads.
+ */
+static void
+present_get_image(DrawablePtr pDrawable, int sx, int sy, int w, int h,
+                  unsigned int format, unsigned long planeMask, char *pdstLine)
+{
+    ScreenPtr screen = pDrawable->pScreen;
+    present_screen_priv_ptr screen_priv = present_screen_priv(screen);
+
+    unwrap(screen_priv, screen, GetImage);
+    (*screen->GetImage)(pDrawable, sx, sy, w, h, format, planeMask, pdstLine);
+    /* Substitute in any per-CRTC flipped content the read would have missed.
+     * Done while unwrapped so its flip-pixmap reads use the original GetImage. */
+    present_flip_overlay_image(pDrawable, sx, sy, w, h, format, planeMask,
+                               pdstLine);
+    wrap(screen_priv, screen, GetImage, present_get_image);
+}
+
 Bool
 present_screen_register_priv_keys(void)
 {
@@ -184,6 +207,7 @@ present_screen_priv_init(ScreenPtr screen)
 
     wrap(screen_priv, screen, ConfigNotify, present_config_notify);
     wrap(screen_priv, screen, ClipNotify, present_clip_notify);
+    wrap(screen_priv, screen, GetImage, present_get_image);
 
     dixSetPrivate(&screen->devPrivates, &present_screen_private_key, screen_priv);
     screen_priv->pScreen = screen;
