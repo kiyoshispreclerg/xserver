@@ -21,12 +21,14 @@
  */
 #include <dix-config.h>
 
+#include <string.h>
 #include <stdbool.h>
 
 #include "dix/screenint_priv.h"
 #include "Xext/randr/randrstr_priv.h"
 #include "Xext/present/present_priv.h"
 
+#include <servermd.h>
 #include <misync.h>
 #include <misyncstr.h>
 
@@ -191,6 +193,108 @@ present_flip_is_per_crtc(ScreenPtr screen, PixmapPtr pixmap)
     return pixmap &&
            (pixmap->drawable.width != screen_pixmap->drawable.width ||
             pixmap->drawable.height != screen_pixmap->drawable.height);
+}
+
+/*
+ * When a per-CRTC flip is active, that CRTC scans out the flip pixmap, not the
+ * screen pixmap -- so a root GetImage (as used by XGetImage/XShmGetImage screen
+ * recorders) reads stale content for that region. Substitute the flipped
+ * content back in: for each active per-CRTC flip whose CRTC rectangle overlaps
+ * the requested region, read the flip pixmap for the overlap and copy it into
+ * the caller's result buffer. Reads only; the screen pixmap isn't touched, so
+ * this generates no damage (and thus no feedback loop with XDamage-driven
+ * recorders). Cost is paid only when something captures.
+ */
+void
+present_flip_overlay_image(DrawablePtr pDrawable, int sx, int sy, int w, int h,
+                           unsigned int format, unsigned long planeMask,
+                           char *pdstLine)
+{
+    ScreenPtr                   screen = pDrawable->pScreen;
+    present_screen_priv_ptr     screen_priv = present_screen_priv(screen);
+    present_flip_state_ptr      fs;
+    int                         depth, bpp8, dst_stride;
+    int                         req_x0, req_y0, req_x1, req_y1;
+
+    if (!screen_priv)
+        return;
+
+    /* Only the root ("the screen") capture path needs the displayed (flipped)
+     * content substituted in; a specific window's GetImage wants that window. */
+    if (pDrawable->type != DRAWABLE_WINDOW ||
+        (WindowPtr) pDrawable != screen->root)
+        return;
+
+    /* Only packed (ZPixmap), byte-aligned pixels are handled; anything else
+     * (rare XYPixmap/bitplane reads) passes through unchanged. */
+    if (format != ZPixmap)
+        return;
+    depth = pDrawable->depth;
+    if (pDrawable->bitsPerPixel % 8)
+        return;
+    bpp8 = pDrawable->bitsPerPixel / 8;
+
+    req_x0 = pDrawable->x + sx;
+    req_y0 = pDrawable->y + sy;
+    req_x1 = req_x0 + w;
+    req_y1 = req_y0 + h;
+    dst_stride = PixmapBytePad(w, depth);
+
+    xorg_list_for_each_entry(fs, &screen_priv->flip_states, link) {
+        PixmapPtr   fp = fs->flip_pixmap;
+        BoxRec      box;
+        int         ix0, iy0, ix1, iy1, sw, sh, tmp_stride, r;
+        char       *tmp;
+
+        if (!fp || !fs->crtc || !present_crtc_box(fs->crtc, &box))
+            continue;
+
+        /* Byte layout must match for the row copy below. */
+        if (fp->drawable.depth != depth ||
+            fp->drawable.bitsPerPixel != pDrawable->bitsPerPixel)
+            continue;
+
+        /* Intersect the requested region with this CRTC's rectangle. */
+        ix0 = max(req_x0, box.x1);
+        iy0 = max(req_y0, box.y1);
+        ix1 = min(req_x1, box.x2);
+        iy1 = min(req_y1, box.y2);
+        if (ix0 >= ix1 || iy0 >= iy1)
+            continue;
+
+        sw = ix1 - ix0;
+        sh = iy1 - iy0;
+
+        /* Fast path: the overlap spans the full result width (e.g. a recorder
+         * capturing exactly this one output), so the flip pixmap's rows line up
+         * with the result buffer's rows -- read straight into it, no copy. The
+         * flip pixmap's origin is the CRTC origin, so shift by its top-left. */
+        if (ix0 - req_x0 == 0 && sw == w) {
+            (*screen->GetImage)(&fp->drawable, ix0 - box.x1, iy0 - box.y1, sw, sh,
+                                format, planeMask,
+                                pdstLine + (size_t)(iy0 - req_y0) * dst_stride);
+            continue;
+        }
+
+        /* General case (overlap narrower than the result, e.g. side-by-side
+         * CRTCs in a whole-root capture): read into a temp then copy the rows
+         * into their sub-rectangle of the result buffer. */
+        tmp_stride = PixmapBytePad(sw, depth);
+        tmp = malloc((size_t) tmp_stride * sh);
+        if (!tmp)
+            continue;
+
+        (*screen->GetImage)(&fp->drawable, ix0 - box.x1, iy0 - box.y1, sw, sh,
+                            format, planeMask, tmp);
+
+        for (r = 0; r < sh; r++)
+            memcpy(pdstLine + (size_t)(iy0 - req_y0 + r) * dst_stride
+                            + (size_t)(ix0 - req_x0) * bpp8,
+                   tmp + (size_t) r * tmp_stride,
+                   (size_t) sw * bpp8);
+
+        free(tmp);
+    }
 }
 
 static Bool
