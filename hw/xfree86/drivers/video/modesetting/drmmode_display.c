@@ -1510,12 +1510,36 @@ drmmode_create_tearfree_shadow(xf86CrtcPtr crtc)
     return TRUE;
 }
 
+/* Is any CRTC's scanout currently owned by a per-CRTC Present flip? Unlike a
+ * whole-screen flip these don't set the global present_flipping, so they're
+ * tracked per CRTC by present_flip_fb_id. */
+static Bool
+drmmode_has_per_crtc_flip(ScrnInfoPtr scrn)
+{
+    xf86CrtcConfigPtr config = XF86_CRTC_CONFIG_PTR(scrn);
+    int i;
+
+    for (i = 0; i < config->num_crtc; i++) {
+        drmmode_crtc_private_ptr drmmode_crtc = config->crtc[i]->driver_private;
+
+        if (drmmode_crtc && drmmode_crtc->present_flip_fb_id)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static void drmmmode_prepare_modeset(ScrnInfoPtr scrn)
 {
     ScreenPtr pScreen = scrn->pScreen;
     modesettingPtr ms = modesettingPTR(scrn);
 
-    if (!ms->drmmode.present_flipping || ms->drmmode.pending_modeset)
+    /* A per-CRTC flip must also be unflipped and drained before reprogramming
+     * any CRTC, even though it doesn't set present_flipping: otherwise the
+     * modeset can race a still-pending flip completion (crash), or leave a
+     * CRTC's scanout owned by a now-stale flip so TearFree never resumes on it
+     * (the output freezes until the flip's client exits). */
+    if ((!ms->drmmode.present_flipping && !drmmode_has_per_crtc_flip(scrn)) ||
+        ms->drmmode.pending_modeset)
         return;
 
     /*
@@ -1528,6 +1552,17 @@ static void drmmmode_prepare_modeset(ScrnInfoPtr scrn)
     ms->drmmode.pending_modeset = FALSE;
 
     ms_drain_drm_events(pScreen);
+}
+
+/* Unflip and drain any pending Present flips (whole-screen or per-CRTC) while we
+ * still hold DRM master -- e.g. at the start of a VT switch, before dropping
+ * master. Otherwise a per-CRTC flip left in flight has its completion delivered
+ * against torn-down state after master is dropped, crashing in the DRM event
+ * handler. Reuses the pre-modeset unflip path. */
+void
+drmmode_flush_present_flips(ScrnInfoPtr scrn)
+{
+    drmmmode_prepare_modeset(scrn);
 }
 
 static Bool
