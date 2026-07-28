@@ -2317,6 +2317,12 @@ LeaveVT(ScrnInfoPtr pScrn)
 {
     modesettingPtr ms = modesettingPTR(pScrn);
 
+    /* Unflip and drain any pending Present flips while we still hold DRM master
+     * (vtSema is still TRUE here). A per-CRTC flip left in flight across the VT
+     * switch would otherwise have its completion event delivered after master is
+     * dropped, crashing in the DRM event handler. */
+    drmmode_flush_present_flips(pScrn);
+
     xf86_hide_cursors(pScrn);
 
     pScrn->vtSema = FALSE;
