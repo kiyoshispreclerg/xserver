@@ -22,6 +22,7 @@
  */
 #include <xorg-config.h>
 
+#include <math.h>
 #include <stddef.h>
 #include <string.h>
 #include <stdbool.h>
@@ -448,6 +449,31 @@ xf86_crtc_set_cursor_position(xf86CrtcPtr crtc, int x, int y)
     else {
         crtc_x -= crtc->x;
         crtc_y -= crtc->y;
+#ifdef CONFIG_INPUT_SCALE
+        /* X-INPUT-SCALE: scale this CRTC's local offset by its own factor,
+         * if confined. Done here rather than upstream (on the shared
+         * desktop-space x/y every CRTC receives) so that each CRTC decides
+         * independently, using only its own scale - this is what makes the
+         * cursor already appear correctly scaled on a confined CRTC while
+         * still straddling the boundary with an unconfined (or differently
+         * scaled) neighbor, instead of popping to the right size only once
+         * the hotspot itself crosses in. The unscaled hotspot subtraction
+         * xf86SetCursor() already applied upstream (hw/xfree86/ramdac/
+         * xf86HWCurs.c) falls out of this scaling automatically: scaling
+         * the whole already-hotspot-adjusted offset uniformly is
+         * equivalent to subtracting the *scaled* hotspot from the *scaled*
+         * tip position, which is what's visually correct once the bitmap
+         * itself has been scaled by the same factor (see
+         * xf86_crtc_load_cursor_argb() in this file). */
+        if (crtc->randr_crtc) {
+            double sx, sy;
+
+            if (XInputScaleGetCrtcScale(crtc->randr_crtc, &sx, &sy)) {
+                crtc_x = (int) lround(crtc_x * sx);
+                crtc_y = (int) lround(crtc_y * sy);
+            }
+        }
+#endif
     }
 
     /*
