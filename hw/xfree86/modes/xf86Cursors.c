@@ -385,9 +385,43 @@ xf86_crtc_transform_cursor_position(xf86CrtcPtr crtc, int *x, int *y)
                                                &xf86CursorScreenKeyRec);
     int dx, dy, t;
     bool swap_reflection = FALSE;
+    int hot_x = ScreenPriv->HotX, hot_y = ScreenPriv->HotY;
 
     *x = *x - crtc->x + ScreenPriv->HotX;
     *y = *y - crtc->y + ScreenPriv->HotY;
+
+#ifdef CONFIG_INPUT_SCALE
+    /* X-INPUT-SCALE: *x/ *y are, at this point, the hotspot-cancelled
+     * desktop-footprint position relative to the CRTC's origin (the "+
+     * HotX/HotY" above exactly undoes the unscaled hotspot subtraction
+     * xf86SetCursor() applied upstream) - the same desktop/footprint
+     * convention XInputScaleGetCrtcScale()'s ratio and the confine box are
+     * both defined in (see xis_crtc_box() in Xext/inputscale/inputscale.c,
+     * which already swaps width/height for RR_Rotate_90/270 to compute
+     * that same footprint). Scaling here, before the rotation remap below,
+     * mirrors exactly what the RR_Rotate_0 path does in
+     * xf86_crtc_set_cursor_position() and for the same reason: it must
+     * happen per-CRTC, on this CRTC's own local coordinate, not once
+     * upstream on the position shared by every CRTC.
+     *
+     * The bitmap's hotspot pixel also needs scaling separately here: unlike
+     * the RR_Rotate_0 path, this function doesn't keep the hotspot folded
+     * into *x/ *y throughout (it's cancelled above, then re-derived at the
+     * end via xf86_crtc_rotate_coord_back() in *buffer*, not desktop,
+     * coordinates) - xf86_crtc_load_cursor_argb() paints the scaled glyph
+     * into the same fixed-size buffer this reads from, so the hotspot
+     * pixel within it has also moved by the same factor. */
+    if (crtc->randr_crtc) {
+        double sx, sy;
+
+        if (XInputScaleGetCrtcScale(crtc->randr_crtc, &sx, &sy)) {
+            *x = (int) lround(*x * sx);
+            *y = (int) lround(*y * sy);
+            hot_x = (int) lround(hot_x * sx);
+            hot_y = (int) lround(hot_y * sy);
+        }
+    }
+#endif
 
     switch (crtc->rotation & 0xf) {
     case RR_Rotate_0:
@@ -426,8 +460,8 @@ xf86_crtc_transform_cursor_position(xf86CrtcPtr crtc, int *x, int *y)
      * Transform position of cursor upper left corner
      */
     xf86_crtc_rotate_coord_back(crtc->rotation, cursor_info->MaxWidth,
-                                cursor_info->MaxHeight, ScreenPriv->HotX,
-                                ScreenPriv->HotY, &dx, &dy);
+                                cursor_info->MaxHeight, hot_x,
+                                hot_y, &dx, &dy);
     *x -= dx;
     *y -= dy;
 }
