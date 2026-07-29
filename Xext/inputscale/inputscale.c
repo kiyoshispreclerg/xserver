@@ -31,8 +31,6 @@
  */
 #include <dix-config.h>
 
-#include <math.h>
-
 #include <X11/Xmd.h>
 #include <X11/Xproto.h>
 
@@ -113,18 +111,13 @@ xis_box_contains_box(const BoxRec *outer, const BoxRec *inner)
 }
 
 /* ------------------------------------------------------------------ *
- *  Hardware cursor placement: logical -> physical, for the sprite only
+ *  Hardware cursor scale factor
  *
- *  The pointer's logical position (pPointer->x/y, used for hit-testing,
- *  QueryPointer, event reporting) is never remapped by this extension - see
- *  the file header. But a *hardware* cursor plane is positioned by the
- *  driver in physical scanout coordinates, which differ from the logical
- *  coordinate range while a CRTC is confined. Without this, the HW cursor
- *  sprite visibly points at the wrong place on a confined CRTC (it ends up
- *  positioned as if logical == physical, which is only true when nothing is
- *  confined) - this is the one place a logical->physical mapping is needed,
- *  scoped strictly to where the sprite is drawn (see mi/mipointer.c,
- *  miPointerUpdateSprite()), never to any reported/hit-test coordinate.
+ *  Consumed by hw/xfree86/modes/xf86Cursors.c for both bitmap scaling
+ *  (xf86_crtc_load_cursor_argb()) and, applied locally per CRTC to that
+ *  CRTC's own offset, position (xf86_crtc_set_cursor_position()). See the
+ *  declaration in include/inputscale.h for why position scaling happens
+ *  there instead of once upstream on the shared pointer position.
  * ------------------------------------------------------------------ */
 
 Bool
@@ -146,46 +139,6 @@ XInputScaleGetCrtcScale(RRCrtcPtr crtc, double *sx, double *sy)
     *sx = (double) (physical.x2 - physical.x1) / confine_w;
     *sy = (double) (physical.y2 - physical.y1) / confine_h;
     return TRUE;
-}
-
-void
-XInputScaleLogicalToPhysicalCursor(ScreenPtr pScreen, int hotx, int hoty,
-                                   int *x, int *y)
-{
-    rrScrPrivPtr pScrPriv;
-
-    if (!XInputScaleActive() || !pScreen)
-        return;
-
-    pScrPriv = rrGetScrPriv(pScreen);
-    if (!pScrPriv)
-        return;
-
-    for (int i = 0; i < pScrPriv->numCrtcs; i++) {
-        RRCrtcPtr crtc = pScrPriv->crtcs[i];
-        BoxRec physical;
-        double sx, sy;
-
-        if (!crtc->confine_active)
-            continue;
-        if (!xis_box_contains(&crtc->confine_box, *x, *y))
-            continue;
-        if (!XInputScaleGetCrtcScale(crtc, &sx, &sy))
-            continue;
-        if (!xis_crtc_box(&physical, crtc))
-            continue;
-
-        /* Position the visually-scaled hotspot pixel where the pointer tip
-         * actually is, not the unscaled one - see the comment on this
-         * function's declaration in include/inputscale.h. */
-        *x = physical.x1
-             + (int) lround((double) (*x - crtc->confine_box.x1) * sx)
-             - (int) lround(hotx * (sx - 1));
-        *y = physical.y1
-             + (int) lround((double) (*y - crtc->confine_box.y1) * sy)
-             - (int) lround(hoty * (sy - 1));
-        return;
-    }
 }
 
 /* ------------------------------------------------------------------ *
