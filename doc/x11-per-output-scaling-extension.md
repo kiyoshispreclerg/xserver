@@ -5,13 +5,14 @@ to a sub-rectangle of that CRTC's **physical** scanout area — the "logical"
 region it is actually drawing sharp, higher-density content into for that
 output. The core mechanism touches exactly one thing: where the cursor is
 allowed to be. It does **not** remap window geometry or click/hit-testing —
-those stay exactly as they already are. Two additional, separately-flagged
-pieces build on the same confinement state: mapping the *hardware cursor's*
-draw position from logical to physical space (§Hardware cursor position
-mapping), and an experimental RandR geometry override to help popup
-placement (§Experimental). Both are opt-in by construction — they only ever
-affect a CRTC that has confinement active — but are newer and less
-battle-tested than the core confinement mechanism.
+those stay exactly as they already are. Two additional pieces build on the
+same confinement state: scaling the *hardware cursor itself* (position and
+bitmap, §Hardware cursor) so it stays sharp and correctly placed without
+falling back to a laggy software-composited cursor, and an experimental
+RandR geometry override to help popup placement (§Experimental). Both are
+opt-in by construction — they only ever affect a CRTC that has confinement
+active — but the RandR override is newer and less battle-tested than
+everything else here.
 
 ## Why this exists, and why it's this narrow
 
@@ -114,54 +115,86 @@ rectangle.
   logical/physical duality is allowed to leak past pure confinement, and both
   are scoped to a single, narrow consumer each.
 
-## Hardware cursor position mapping
+## Hardware cursor: position and bitmap scaling
 
-**Status: implemented, narrowly scoped, no known issues yet.**
+**Status: implemented and tested (modesetting, amdgpu). Nearest-neighbor
+bitmap scaling only.**
 
 A hardware cursor plane/sprite is positioned by the driver in *physical*
-scanout coordinates (e.g. `drmModeMoveCursor()` in the `modesetting` DDX,
-`hw/xfree86/drivers/video/modesetting/drmmode_display.c`). The pointer's
-logical position (`pPointer->x/y`) is correct for everything else, but handed
-directly to the driver it points the HW cursor at the wrong physical
-location on a confined CRTC — it's only correct when nothing is confined.
+scanout coordinates, and its bitmap is uploaded at a fixed hardware size.
+The pointer's logical position (`pPointer->x/y`) is correct for everything
+else (hit-testing, `QueryPointer`, event reporting — never touched by any of
+this), but handed straight to the driver it points the HW cursor at the
+wrong physical location on a confined CRTC, and the bitmap looks undersized
+relative to the panel's physical pixel density. Both are fixed entirely
+inside `hw/xfree86/modes/xf86Cursors.c` — the shared `xf86Crtc` framework
+used by `modesetting`, `amdgpu`, `nouveau`, and legacy `intel`, so this is
+**not** modesetting-specific except for one small piece noted below.
 
-`XInputScaleLogicalToPhysicalCursor()` (`Xext/inputscale/inputscale.c`) maps
-a logical point to the corresponding physical point using whichever CRTC's
-confine box currently contains it: `physical = crtc_physical_origin +
-(logical - confine_box_origin) × (physical_size / confine_size)`. It is
-called from **both** places in `mi/mipointer.c` that push a position to the
-sprite backend (`spriteFuncs->SetCursor`/`MoveCursor`), each via a local
-`hwx, hwy` pair computed just for that call:
+`XInputScaleGetCrtcScale(RRCrtcPtr, double *sx, double *sy)`
+(`Xext/inputscale/inputscale.c`, declared in `include/inputscale.h`) is the
+single `physical / confine` ratio both position and bitmap scaling below
+consume, so they can never disagree with each other. It takes an
+`xf86CrtcPtr`'s `->randr_crtc` field to find the matching `RRCrtcPtr`.
 
-- `miPointerUpdateSprite()` — the normal sprite update path.
-- `miPointerMoveNoEvent()` — the "silken mouse" *immediate* update path,
-  which runs on every motion event ahead of the normal update cycle
-  specifically for low perceived latency. Missing this one was the first
-  attempt's bug: the sprite would flash at the unscaled/physical position on
-  every move (this fast path's uncorrected write) before
-  `miPointerUpdateSprite()` corrected it moments later — briefly but
-  continuously visible while the pointer was in motion, even though
-  `pPointer->x/y` (and therefore hit-testing and click position) were
-  already correct the whole time.
+Both `XInputScaleGetCrtcScale`/`XInputScaleActive` are declared `_X_EXPORT`
+(`include/inputscale.h`) — `modesetting_drv.so` (and any other DDX driver
+module) is a separately `dlopen()`ed shared object that only resolves
+against the server's *exported* dynamic symbols, not its static-library
+internals; missing this caused an "undefined symbol" at driver load time
+the first time a driver-side caller was added.
 
-In both places, `pPointer->devx/devy` (compared against `pPointer->x/y` to
-decide whether anything moved) are never touched by this — they stay
-logical, exactly as before this addition, so nothing about hit-testing,
-dedup, or reporting changes.
+### Position: per-CRTC, not upstream
 
-Declared in [`include/inputscale.h`](../include/inputscale.h), mirroring the
-`XInputTransformPhysToLogical`-style DIX helper the earlier, removed
-extension used — except this one only ever affects where a bitmap gets
-drawn, never any coordinate reported to a client, which is exactly the
-distinction that made the earlier design's remap unsafe and this one safe.
+**First attempt (reverted):** map the pointer's logical position to physical
+once, upstream in `mi/mipointer.c`, based on which CRTC's confine box
+contained it, and hand the single transformed value down through the normal
+sprite-position plumbing. This worked for the simple case but broke down at
+a monitor boundary: X.Org's own `xf86_crtc_set_cursor_position()`
+(`hw/xfree86/modes/xf86Cursors.c`) already shows the hardware cursor
+simultaneously on *every* CRTC whose physical area the (single, shared)
+cursor position is within `cursor_info->MaxWidth/MaxHeight` of — this is
+what makes cursor motion look continuous crossing between two ordinary
+monitors. Since the upstream transform only activated once the point was
+*inside* the confine box, the confined CRTC's cursor plane would show an
+unscaled fragment of the bitmap, at the unscaled position, for however long
+the pointer was straddling the boundary but hadn't yet crossed in — then pop
+to the correct scaled position/size the instant it did.
 
-### Bitmap scaling
+**Fix:** scale locally, per CRTC, inside `xf86_crtc_set_cursor_position()`,
+operating on that CRTC's own already-computed local offset (`crtc_x = x -
+crtc->x`, already including the unscaled hotspot subtraction `xf86SetCursor()`
+applies upstream in `hw/xfree86/ramdac/xf86HWCurs.c`) rather than the shared
+desktop-space value every CRTC receives:
 
-**Status: implemented, experimental — nearest-neighbor only.**
+```c
+crtc_x -= crtc->x;
+crtc_y -= crtc->y;
+if (XInputScaleGetCrtcScale(crtc->randr_crtc, &sx, &sy)) {
+    crtc_x = lround(crtc_x * sx);
+    crtc_y = lround(crtc_y * sy);
+}
+```
 
-Position mapping alone leaves the cursor *correctly placed* but visually
-undersized on a confined CRTC — the bitmap itself was still uploaded at its
-native size. Two layers needed fixing, both `modesetting`-DDX-specific:
+Each CRTC now decides independently, continuously, using only its own
+factor — the confined CRTC's cursor plane is already correctly scaled and
+positioned *before* the hotspot crosses in, so the straddle looks like a
+normal multi-monitor cursor transition instead of a pop. The unscaled
+hotspot subtraction upstream needs no separate correction here: scaling the
+whole already-hotspot-adjusted offset uniformly is algebraically the same as
+subtracting the *scaled* hotspot from the *scaled* tip position — exactly
+what's visually correct once the bitmap itself is scaled by the same factor.
+(A short-lived first implementation of this fix folded a hotspot correction
+term into a since-removed `XInputScaleLogicalToPhysicalCursor()` upstream
+helper; it's gone now that the math falls out for free at the right layer.)
+
+Only the `RR_Rotate_0` path is scaled; a rotated *and* confined CRTC is an
+unhandled combination for now.
+
+### Bitmap: nearest-neighbor upsampling, two layers had to agree
+
+Two things independently determine what a hardware cursor plane displays,
+and both needed to agree on the glyph's *effective* size:
 
 - `xf86_crtc_load_cursor_argb()` (`hw/xfree86/modes/xf86Cursors.c`) composes
   a cursor glyph into the fixed-size hardware buffer, **once per enabled
@@ -174,17 +207,19 @@ native size. Two layers needed fixing, both `modesetting`-DDX-specific:
   nearest-neighbor upsampling of the glyph into the same fixed buffer, so it
   now occupies proportionally more of it.
 
-- `drmmode_load_cursor_argb_check()`
-  (`hw/xfree86/drivers/video/modesetting/drmmode_display.c`) independently
-  decides how much of that buffer is actually "the cursor" — which hardware
-  cursor plane size to use, and what region to crop/upload — by reading
-  `cursor->bits->width/height` straight off the `CursorPtr`, with no idea
-  that the layer above had already painted a larger glyph into the buffer.
+- `drmmode_load_cursor_argb_check()` — the **one `modesetting`-DDX-specific
+  piece** (`hw/xfree86/drivers/video/modesetting/drmmode_display.c`) —
+  independently decides how much of that buffer is actually "the cursor":
+  which hardware cursor plane size to use, and what region to crop/upload,
+  by reading `cursor->bits->width/height` straight off the `CursorPtr`, with
+  no idea the layer above already painted a larger glyph into the buffer.
   Left alone, it cropped back down to the *original*, unscaled dimensions,
-  visibly clipping the correctly-scaled content. Fixed by having it apply
-  the same `XInputScaleGetCrtcScale()` factor to `glyph_width/height` before
-  they drive hardware-size selection and cropping — both layers now agree on
-  how big the glyph actually is.
+  visibly clipping the correctly-scaled content. Fixed by applying the same
+  `XInputScaleGetCrtcScale()` factor to `glyph_width/height` before they
+  drive hardware-size selection and cropping. Other DDX drivers not present
+  in this tree (`amdgpu`, `nouveau`, ...) likely have their own, separate
+  implementation of this same kind of function and may need the equivalent
+  fix in their own source trees.
 
   This turned out to also close a gap for free: hardware-size selection
   already picks the smallest hardware-supported cursor plane size `>=` the
@@ -193,23 +228,10 @@ native size. Two layers needed fixing, both `modesetting`-DDX-specific:
   enough that no supported plane size fits correctly falls back instead of
   silently clipping.
 
-`XInputScaleGetCrtcScale(RRCrtcPtr, double *sx, double *sy)`
-(`Xext/inputscale/inputscale.c`, declared in `include/inputscale.h`) is the
-same `physical / confine` ratio the position mapping above uses — all three
-call sites consume the identical confinement state, so they can never
-disagree with each other. Each takes an `xf86CrtcPtr`'s `->randr_crtc` field
-to find the matching `RRCrtcPtr`.
-
-**Known rough edges, not yet handled:**
-
-- **Nearest-neighbor only** — blockier than a "real" higher-density hardware
-  cursor would look. An accepted tradeoff for latency, per the original
-  motivation, but bilinear would look better if the cost is acceptable.
-- **Hotspot correction is folded into position mapping, not verified in
-  practice yet** — `XInputScaleLogicalToPhysicalCursor()` now takes the
-  *unscaled* hotspot and applies a `-hotspot × (scale - 1)` correction so the
-  scaled hotspot pixel lands where the pointer tip actually is; this has not
-  been visually confirmed against a real scaled cursor theme/click point yet.
+**Known rough edge, not yet handled:** nearest-neighbor only — blockier than
+a "real" higher-density hardware cursor would look. An accepted tradeoff for
+latency, per the original motivation, but bilinear would look better if the
+cost is acceptable.
 
 ## Experimental: lying in RandR geometry replies
 
