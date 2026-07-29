@@ -188,8 +188,28 @@ what's visually correct once the bitmap itself is scaled by the same factor.
 term into a since-removed `XInputScaleLogicalToPhysicalCursor()` upstream
 helper; it's gone now that the math falls out for free at the right layer.)
 
-Only the `RR_Rotate_0` path is scaled; a rotated *and* confined CRTC is an
-unhandled combination for now.
+**Rotated CRTCs** go through a different function,
+`xf86_crtc_transform_cursor_position()`, which is *not* a simple offset —
+it cancels the unscaled-hotspot subtraction applied upstream (`*x = *x -
+crtc->x + ScreenPriv->HotX`, landing back on the same hotspot-free,
+desktop-footprint-relative quantity the `RR_Rotate_0` path scales), remaps
+axes through the rotation, and re-derives a *rotated, buffer-local* hotspot
+offset at the end via `xf86_crtc_rotate_coord_back()` — a different quantity
+in different (fixed hardware buffer, not desktop) coordinates than the
+`RR_Rotate_0` path's hotspot, so it doesn't get the "falls out for free"
+treatment above. Two separate scale applications are needed here:
+
+- Scale `*x`/`*y` by `sx`/`sy` right after the hotspot-cancelling line,
+  before the rotation switch — same desktop-footprint convention
+  `XInputScaleGetCrtcScale()`'s ratio and `xis_crtc_box()` are already
+  defined in (which already swaps width/height for `RR_Rotate_90/270`, so
+  no axis-swap juggling is needed here despite the rotation).
+- Scale the hotspot (`hot_x = HotX * sx`, `hot_y = HotY * sy`) passed into
+  the final `xf86_crtc_rotate_coord_back()` call, since that call computes
+  where the hotspot pixel sits *within the fixed hardware buffer* —
+  `xf86_crtc_load_cursor_argb()` paints the scaled glyph into that same
+  buffer, so the meaningful/"hot" pixel within it has moved by the same
+  factor too.
 
 ### Bitmap: nearest-neighbor upsampling, two layers had to agree
 
