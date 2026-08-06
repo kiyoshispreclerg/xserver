@@ -31,6 +31,8 @@
  */
 #include <dix-config.h>
 
+#include <math.h>
+
 #include <X11/Xmd.h>
 #include <X11/Xproto.h>
 
@@ -139,6 +141,52 @@ XInputScaleGetCrtcScale(RRCrtcPtr crtc, double *sx, double *sy)
     *sx = (double) (physical.x2 - physical.x1) / confine_w;
     *sy = (double) (physical.y2 - physical.y1) / confine_h;
     return TRUE;
+}
+
+/* TRUE and rewrites *x/*y (screen coordinates) in place iff they land on a
+ * confined CRTC: maps them from that CRTC's logical confine-box space to
+ * where they actually show up in the physical framebuffer, the same way
+ * xf86_crtc_set_cursor_position() maps the hardware cursor plane's position
+ * (see the comment on XInputScaleGetCrtcScale() in include/inputscale.h).
+ * FALSE (leaving *x/*y untouched) otherwise.
+ *
+ * For callers that report cursor position to clients from the *logical*
+ * pointer coordinate (e.g. XFixesGetCursorImage in Xext/xfixes/cursor.c) -
+ * screen recorders and similar tools composite that reply on top of the
+ * physical framebuffer they captured, so it needs to agree with where the
+ * cursor is actually drawn, not where the (unscaled) pointer position says
+ * it logically is. */
+Bool
+XInputScaleScalePoint(ScreenPtr pScreen, int *x, int *y)
+{
+    rrScrPrivPtr pScrPriv;
+
+    if (!XInputScaleActive())
+        return FALSE;
+
+    pScrPriv = rrGetScrPriv(pScreen);
+    if (!pScrPriv)
+        return FALSE;
+
+    for (int i = 0; i < pScrPriv->numCrtcs; i++) {
+        RRCrtcPtr crtc = pScrPriv->crtcs[i];
+        BoxRec physical;
+        double sx, sy;
+
+        if (!crtc->confine_active)
+            continue;
+        if (!xis_crtc_box(&physical, crtc))
+            continue;
+        if (!xis_box_contains(&physical, *x, *y))
+            continue;
+        if (!XInputScaleGetCrtcScale(crtc, &sx, &sy))
+            return FALSE;
+
+        *x = crtc->x + (int) lround((*x - crtc->x) * sx);
+        *y = crtc->y + (int) lround((*y - crtc->y) * sy);
+        return TRUE;
+    }
+    return FALSE;
 }
 
 /* ------------------------------------------------------------------ *
