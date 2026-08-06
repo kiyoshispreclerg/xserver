@@ -53,6 +53,7 @@
 #include "include/extinit.h"
 #include "include/misc.h"
 #include "mi/mi_priv.h"
+#include "Xext/xnotify/xnotify.h"
 
 #include "xf86.h"
 #include "xf86str.h"
@@ -1230,6 +1231,9 @@ ProcXDGAOpenFramebuffer(ClientPtr client)
     char *deviceName;
     int nameSize;
 
+    if (!XnotifyIsAllowed(client, XNOTIFY_SCREEN))
+        return BadAccess;
+
     REQUEST_SIZE_MATCH(xXDGAOpenFramebufferReq);
 
     ScreenPtr pScreen = dixGetScreenPtr(stuff->screen);
@@ -1385,6 +1389,9 @@ ProcXDGASetMode(ClientPtr client)
 
     REQUEST_SIZE_MATCH(xXDGASetModeReq);
 
+    if (stuff->mode && !XnotifyIsAllowed(client, XNOTIFY_SCREEN))
+        return BadAccess;
+
     ScreenPtr pScreen = dixGetScreenPtr(stuff->screen);
     if (!pScreen)
         return BadValue;
@@ -1511,6 +1518,9 @@ ProcXDGASelectInput(ClientPtr client)
     REQUEST(xXDGASelectInputReq);
 
     REQUEST_SIZE_MATCH(xXDGASelectInputReq);
+
+    if (stuff->mask && !XnotifyIsAllowed(client, XNOTIFY_INPUT_GRAB))
+        return BadAccess;
 
     ScreenPtr pScreen = dixGetScreenPtr(stuff->screen);
     if (!pScreen)
@@ -1730,6 +1740,9 @@ ProcXF86DGAGetVideoLL(ClientPtr client)
     if (!DGAAllowNonLocal && !client->local)
         return BadAccess;
 
+    if (!XnotifyIsAllowed(client, XNOTIFY_SCREEN))
+        return BadAccess;
+
     if (stuff->screen >= screenInfo.numScreens)
         return BadValue;
 
@@ -1782,11 +1795,19 @@ ProcXF86DGADirectVideo(ClientPtr client)
         return DGAErrorBase + XF86DGANoDirectVideoMode;
 
     if (stuff->enable & XF86DGADirectGraphics) {
+        if (!XnotifyIsAllowed(client, XNOTIFY_SCREEN))
+            return BadAccess;
+
         if (!(num = DGAGetOldDGAMode(stuff->screen)))
             return DGAErrorBase + XF86DGANoDirectVideoMode;
     }
     else
         num = 0;
+
+    if (stuff->enable & (XF86DGADirectKeyb | XF86DGADirectMouse)) {
+        if (!XnotifyIsAllowed(client, XNOTIFY_INPUT_GRAB))
+            return BadAccess;
+    }
 
     if (Success != DGASetMode(stuff->screen, num, &mode, &pix))
         return DGAErrorBase + XF86DGAScreenNotActive;
