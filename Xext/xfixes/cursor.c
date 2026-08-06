@@ -57,6 +57,10 @@
 #include "Xext/xinput/xibarriers.h"
 #include "Xext/xnotify/xnotify.h"
 
+#ifdef CONFIG_INPUT_SCALE
+#include "include/inputscale.h"
+#endif
+
 #include "xfixesint.h"
 #include "scrnintstr.h"
 #include "cursorstr.h"
@@ -360,8 +364,19 @@ ProcXFixesGetCursorImage(ClientPtr client)
     if (rc != Success)
         return rc;
 
+    DeviceIntPtr pPointer = PickPointer(client);
     int x, y;
-    GetSpritePosition(PickPointer(client), &x, &y);
+    GetSpritePosition(pPointer, &x, &y);
+
+#ifdef CONFIG_INPUT_SCALE
+    /* Screen recorders composite this reply against the physical
+     * framebuffer they captured, so on a confined/scaled CRTC it needs to
+     * report where the cursor actually shows up, not the unscaled logical
+     * pointer position (see XInputScaleScalePoint() in
+     * include/inputscale.h). */
+    XInputScaleScalePoint(pPointer->spriteInfo->sprite->hotPhys.pScreen,
+                           &x, &y);
+#endif
 
     int width = pCursor->bits->width;
     int height = pCursor->bits->height;
@@ -459,8 +474,16 @@ ProcXFixesGetCursorImageAndName(ClientPtr client)
     if (rc != Success)
         return rc;
 
+    DeviceIntPtr pPointer = PickPointer(client);
     int x, y;
-    GetSpritePosition(PickPointer(client), &x, &y);
+    GetSpritePosition(pPointer, &x, &y);
+
+#ifdef CONFIG_INPUT_SCALE
+    /* See the matching comment in ProcXFixesGetCursorImage() above. */
+    XInputScaleScalePoint(pPointer->spriteInfo->sprite->hotPhys.pScreen,
+                           &x, &y);
+#endif
+
     int width = pCursor->bits->width;
     int height = pCursor->bits->height;
     int npixels = width * height;

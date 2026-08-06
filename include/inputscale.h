@@ -12,6 +12,7 @@
 #define _XSERVER_INPUTSCALE_H
 
 #include <X11/Xdefs.h>          /* Bool */
+#include "screenint.h"          /* ScreenPtr */
 #include "randrstr.h"           /* RRCrtcPtr */
 
 /*
@@ -43,5 +44,19 @@ extern _X_EXPORT Bool XInputScaleActive(void);
  * the right place only once the pointer's hotspot itself crosses in.
  */
 extern _X_EXPORT Bool XInputScaleGetCrtcScale(RRCrtcPtr crtc, double *sx, double *sy);
+
+/*
+ * TRUE and rewrites *x/*y (screen coordinates) in place iff they land on a
+ * CRTC with an active confinement box: maps them from that CRTC's logical
+ * confine-box space to where they actually show up in the physical
+ * framebuffer. FALSE (leaving *x/*y untouched) otherwise.
+ *
+ * For reporting cursor position to clients that composite against the
+ * physical framebuffer directly - e.g. XFixesGetCursorImage, consumed by
+ * screen recorders - rather than through the core input pipeline (which
+ * never needs this: window geometry and hit-testing are deliberately never
+ * remapped, see the file comment in Xext/inputscale/inputscale.c).
+ */
+extern _X_EXPORT Bool XInputScaleScalePoint(ScreenPtr pScreen, int *x, int *y);
 
 #endif /* _XSERVER_INPUTSCALE_H */
