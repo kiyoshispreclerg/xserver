@@ -125,6 +125,17 @@ typedef Bool (*present_wnmd_flip_ptr) (WindowPtr window,
 typedef void (*present_unflip_ptr) (ScreenPtr screen,
                                     uint64_t event_id);
 
+/* "unflip" a single CRTC back to its normal scanout framebuffer.
+ *
+ * Like present_unflip_ptr, but restores just 'crtc' instead of the whole
+ * screen, leaving every other CRTC (and their independent per-CRTC flips)
+ * untouched. present_event_notify should be called with 'event_id' when the
+ * unflip occurs.
+ */
+typedef void (*present_unflip_crtc_ptr) (ScreenPtr screen,
+                                         RRCrtcPtr crtc,
+                                         uint64_t event_id);
+
 /* Doing flips has been discontinued.
  *
  * Inform driver for potential cleanup on its side.
@@ -156,6 +167,17 @@ typedef struct present_screen_info {
      * whole-screen flips and per-CRTC requests fall back to a copy.
      */
     Bool                                capable_flip_crtc;
+
+    /* Version >= 2.
+     *
+     * Restore a single CRTC to its normal scanout framebuffer, ending a
+     * per-CRTC flip without touching any other CRTC. Paired with
+     * 'capable_flip_crtc': when set, Present calls this (instead of the
+     * whole-screen 'unflip') to end a per-CRTC flip, so it never disturbs
+     * another CRTC's independent flip or a rotated CRTC. Drivers that leave it
+     * NULL fall back to the whole-screen 'unflip'.
+     */
+    present_unflip_crtc_ptr             unflip_crtc;
 
 } present_screen_info_rec, *present_screen_info_ptr;
 
