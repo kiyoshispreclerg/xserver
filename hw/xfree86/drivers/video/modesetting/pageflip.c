@@ -703,6 +703,93 @@ error_free_event:
     return FALSE;
 }
 
+/*
+ * Per-CRTC unflip: flip just 'crtc' back from its per-CRTC flip buffer to the
+ * framebuffer it should normally scan out -- the shared screen fb, its TearFree
+ * buffer, or its rotation shadow, whatever drmmode_crtc_get_fb_id() reports --
+ * leaving every other CRTC untouched. This is the per-CRTC counterpart to the
+ * whole-screen ms_present_unflip(): unflipping one CRTC must not flip the others
+ * to the shared fb, which would collide (EBUSY) with another CRTC's pending
+ * per-CRTC flip or push a rotated CRTC to the wrong scanout.
+ */
+Bool
+ms_do_unflip_crtc(ScreenPtr screen,
+                  void *event,
+                  xf86CrtcPtr crtc,
+                  ms_pageflip_handler_proc pageflip_handler,
+                  ms_pageflip_abort_proc pageflip_abort,
+                  const char *log_prefix)
+{
+    ScrnInfoPtr scrn = xf86ScreenToScrn(screen);
+    struct ms_flipdata *flipdata;
+    enum queue_flip_status flip_status;
+    uint32_t fb_id = 0;
+    int x = 0, y = 0;
+
+    if (!xf86_crtc_on(crtc))
+        goto error_free_event;
+
+    /* The fb this CRTC scans out when it is not running a per-CRTC flip. */
+    if (!drmmode_crtc_get_fb_id(crtc, &fb_id, &x, &y)) {
+        xf86DrvMsg(scrn->scrnIndex, X_WARNING,
+                   "%s: no scanout fb to restore CRTC.\n", log_prefix);
+        goto error_free_event;
+    }
+
+    flipdata = calloc(1, sizeof(*flipdata));
+    if (!flipdata) {
+        xf86DrvMsg(scrn->scrnIndex, X_ERROR,
+                   "%s: Failed to allocate flipdata.\n", log_prefix);
+        goto error_free_event;
+    }
+
+    flipdata->event = event;
+    flipdata->screen = screen;
+    flipdata->event_handler = pageflip_handler;
+    flipdata->abort_handler = pageflip_abort;
+
+    /* Local reference, as in ms_do_pageflip_crtc(). */
+    flipdata->flip_count++;
+
+    /* Flip this one CRTC back to its normal scanout fb. new_present_fb_id = 0
+     * marks it as no longer owned by a per-CRTC flip, so its previous per-CRTC
+     * fb is released on completion and TearFree resumes on it. */
+    flip_status = queue_flip_on_crtc(screen, crtc, flipdata, crtc,
+                                     DRM_MODE_PAGE_FLIP_EVENT, fb_id, x, y, 0);
+    switch (flip_status) {
+    case QUEUE_FLIP_ALLOC_FAILED:
+        xf86DrvMsg(scrn->scrnIndex, X_WARNING,
+                   "%s: carrier alloc for CRTC unflip failed.\n", log_prefix);
+        goto error_out;
+    case QUEUE_FLIP_QUEUE_ALLOC_FAILED:
+        xf86DrvMsg(scrn->scrnIndex, X_WARNING,
+                   "%s: entry alloc for CRTC unflip failed.\n", log_prefix);
+        goto error_out;
+    case QUEUE_FLIP_DRM_FLUSH_FAILED:
+        ms_print_pageflip_error(scrn->scrnIndex, log_prefix, 0,
+                                DRM_MODE_PAGE_FLIP_EVENT, errno);
+        goto error_out;
+    case QUEUE_FLIP_SUCCESS:
+        break;
+    }
+
+    /* Drop our local reference; the queued flip holds the rest. */
+    flipdata->flip_count--;
+    return TRUE;
+
+error_out:
+    if (flipdata->flip_count == 1)
+        free(flipdata);
+    else {
+        flipdata->flip_count--;
+        return FALSE;
+    }
+
+error_free_event:
+    free(event);
+    return FALSE;
+}
+
 Bool
 ms_tearfree_dri_abort(xf86CrtcPtr crtc,
                       Bool (*match)(void *data, void *match_data),
