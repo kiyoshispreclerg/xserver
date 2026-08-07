@@ -28,8 +28,16 @@ This is a soft fork of XLibre named **XiS**, adding a small set of features on t
 * **[Xnotify](doc/Xnotify.md)** for static or dynamic permission rules.
 * **`DisablePrimarySelection`** `ServerFlags` option to turn off the X11 PRIMARY selection.
 * **`KickHotkeysOnRelease`** and **`ToggleModifiersOnPress`** XKB input options, fixing some old small annoyances.
+* Legacy **DGA** protocol brought back, with its raw framebuffer and input access guarded by **[Xnotify](doc/Xnotify.md)**.
+* **[Per-CRTC presentation](doc/present-per-crtc-flip.md)** in the Present extension: a compositor can page-flip a single output instead of the whole screen, so per-output and multi-monitor compositors avoid full-screen copies.
+* **modesetting** DDX updated as the first driver to support per-CRTC page flips.
 
 And more. See the commit history for details on every change.
+
+These additions are new and still evolving, so expect the occasional bug — as always, use at your own risk.
+
+Also please note that the commit history will be rewritten every time we
+pull updates from upstream's master branch.
 
 
 ## Switching to XLibre
