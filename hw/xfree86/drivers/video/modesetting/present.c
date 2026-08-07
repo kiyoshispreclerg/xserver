@@ -263,6 +263,10 @@ ms_present_check_unflip(RRCrtcPtr crtc,
     int num_crtcs_on = 0;
     int i;
     struct gbm_bo *gbm;
+    /* A per-CRTC flip touches only its target CRTC; a whole-screen flip (or an
+     * unflip check, crtc == NULL) touches every CRTC through the shared fb. */
+    Bool per_crtc = crtc && ms_flip_is_per_crtc(screen, pixmap);
+    xf86CrtcPtr target = crtc ? crtc->devPrivate : NULL;
 
     if (!ms->drmmode.pageflip)
         return FALSE;
@@ -276,8 +280,12 @@ ms_present_check_unflip(RRCrtcPtr crtc,
     for (i = 0; i < config->num_crtc; i++) {
         drmmode_crtc_private_ptr drmmode_crtc = config->crtc[i]->driver_private;
 
-        /* Don't do pageflipping if CRTCs are rotated. */
-        if (drmmode_crtc->rotate_bo)
+        /* Don't page-flip a rotated CRTC (it scans out of a rotation shadow BO,
+         * not the flip fb). For a per-CRTC flip only the target CRTC matters --
+         * a rotated *other* CRTC is untouched, so it must not veto the flip. For
+         * a whole-screen flip every CRTC shares the fb, so any rotated one does. */
+        if (drmmode_crtc->rotate_bo &&
+            (!per_crtc || config->crtc[i] == target))
             return FALSE;
 
         if (xf86_crtc_on(config->crtc[i]))
