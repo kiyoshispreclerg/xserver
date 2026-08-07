@@ -263,6 +263,13 @@ Bool ms_do_pageflip_crtc(ScreenPtr screen,
                          ms_pageflip_abort_proc pageflip_abort,
                          const char *log_prefix);
 
+Bool ms_do_unflip_crtc(ScreenPtr screen,
+                       void *event,
+                       xf86CrtcPtr crtc,
+                       ms_pageflip_handler_proc pageflip_handler,
+                       ms_pageflip_abort_proc pageflip_abort,
+                       const char *log_prefix);
+
 Bool
 ms_tearfree_dri_abort(xf86CrtcPtr crtc,
                       Bool (*match)(void *data, void *match_data),
