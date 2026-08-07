@@ -732,25 +732,56 @@ present_restore_screen_pixmap(ScreenPtr screen, present_flip_state_ptr fs)
     PixmapPtr screen_pixmap = (*screen->GetScreenPixmap)(screen);
     PixmapPtr flip_pixmap;
     WindowPtr flip_window;
+    RRCrtcPtr flip_crtc;
 
     if (fs->flip_pending) {
         flip_window = fs->flip_pending->window;
         flip_pixmap = fs->flip_pending->pixmap;
+        flip_crtc = fs->flip_pending->crtc;
     } else {
         flip_window = fs->flip_window;
         flip_pixmap = fs->flip_pixmap;
+        flip_crtc = fs->flip_crtc;
     }
 
     assert (flip_pixmap);
 
     /* A per-CRTC flip never replaced the screen pixmap or the window-tree
-     * pixmaps (it only redirected one CRTC's scanout), so there is nothing to
-     * restore here; the driver flips that CRTC back to the shared framebuffer
-     * on unflip. Copying the CRTC-sized pixmap into the screen pixmap here would
-     * scribble it onto the wrong screen region (e.g. a second CRTC's content
-     * onto the top-left of the screen). */
-    if (present_flip_is_per_crtc(screen, flip_pixmap))
+     * pixmaps (it only redirected one CRTC's scanout), so the pixmap/tree swaps
+     * below don't apply to it. But that CRTC's region of the screen pixmap was
+     * never written while the CRTC scanned out the flip buffer, so on unflip it
+     * would keep showing stale content -- a frozen "ghost" frame -- until
+     * something else repaints it. Seed the region with the last flipped frame
+     * at the CRTC's position: the CopyArea damages that region, so the driver
+     * (including TearFree, which only refreshes damaged areas) repaints it
+     * cleanly on its next vblank instead of scanning out stale pixels.
+     *
+     * Only seed when the flipping window still covers the whole CRTC (its
+     * geometry still matches the CRTC box), i.e. a "clean" unflip like a VT
+     * switch or DPMS blank where that same content should reappear. If the
+     * window has since shrunk or moved -- e.g. a video leaving fullscreen --
+     * its last full-CRTC frame no longer belongs across the areas it has
+     * vacated, and with no compositor to repaint, seeding it there would leave
+     * that frame lingering as a fake background. In that case leave the screen
+     * pixmap untouched.
+     *
+     * Skip rotated/reflected CRTCs too: the flip buffer holds scanout-oriented
+     * pixels that wouldn't match the screen pixmap's logical space (and rotated
+     * per-CRTC flips are an untested edge case anyway). */
+    if (present_flip_is_per_crtc(screen, flip_pixmap)) {
+        BoxRec box;
+
+        if (flip_crtc && flip_window &&
+            flip_crtc->rotation == RR_Rotate_0 &&
+            present_crtc_box(flip_crtc, &box) &&
+            flip_window->drawable.x == box.x1 &&
+            flip_window->drawable.y == box.y1 &&
+            flip_window->drawable.width == box.x2 - box.x1 &&
+            flip_window->drawable.height == box.y2 - box.y1)
+            present_copy_region(&screen_pixmap->drawable, flip_pixmap, NULL,
+                                box.x1, box.y1);
         return;
+    }
 
     /* Update the screen pixmap with the current flip pixmap contents
      * Only do this the first time for a particular unflip operation, or
