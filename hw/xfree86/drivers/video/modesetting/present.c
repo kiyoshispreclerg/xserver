@@ -564,6 +564,35 @@ ms_present_unflip(ScreenPtr screen, uint64_t event_id)
 
     present_event_notify(event_id, 0, 0);
 }
+
+/*
+ * End a per-CRTC flip by flipping just 'crtc' back to its normal scanout,
+ * leaving every other CRTC (and their independent flips, and rotated CRTCs)
+ * untouched. Present calls this instead of the whole-screen ms_present_unflip()
+ * for per-CRTC flips.
+ */
+static void
+ms_present_unflip_crtc(ScreenPtr screen, RRCrtcPtr crtc, uint64_t event_id)
+{
+    xf86CrtcPtr xf86_crtc = crtc->devPrivate;
+    struct ms_present_vblank_event *event;
+
+    event = calloc(1, sizeof(*event));
+    if (!event) {
+        /* Can't track the unflip; notify now so Present doesn't wait forever. */
+        present_event_notify(event_id, 0, 0);
+        return;
+    }
+    event->event_id = event_id;
+    event->unflip = TRUE;
+
+    /* On failure ms_do_unflip_crtc() has freed the event; still notify Present
+     * so the unflip completes (event_id is decoupled from the freed struct). */
+    if (!ms_do_unflip_crtc(screen, event, xf86_crtc,
+                           ms_present_flip_handler, ms_present_flip_abort,
+                           "Present-unflip-crtc"))
+        present_event_notify(event_id, 0, 0);
+}
 #endif
 
 static const present_screen_info_rec ms_present_screen_info = {
@@ -581,6 +610,7 @@ static const present_screen_info_rec ms_present_screen_info = {
     .check_flip2 = ms_present_check_flip,
     .flip = ms_present_flip,
     .unflip = ms_present_unflip,
+    .unflip_crtc = ms_present_unflip_crtc,
 #endif
 };
 
