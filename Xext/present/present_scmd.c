@@ -820,7 +820,20 @@ present_unflip(ScreenPtr screen, present_flip_state_ptr fs)
 
     fs->unflip_event_id = ++present_scmd_event_id;
     DebugPresent(("u %" PRIu64 "\n", fs->unflip_event_id));
-    (*screen_priv->info->unflip) (screen, fs->unflip_event_id);
+
+    /* End a per-CRTC flip by restoring only its CRTC, when the driver supports
+     * it. The whole-screen unflip flips EVERY CRTC back to the shared fb, which
+     * for a per-CRTC flip would collide with another CRTC's still-pending flip
+     * (EBUSY -> re-entrant flush -> crash) or push a rotated CRTC to the wrong
+     * scanout. Restoring just this CRTC leaves the others untouched. */
+    if (fs->flip_crtc &&
+        screen_priv->info->version >= 2 &&
+        screen_priv->info->unflip_crtc &&
+        present_flip_is_per_crtc(screen, fs->flip_pixmap))
+        (*screen_priv->info->unflip_crtc) (screen, fs->flip_crtc,
+                                           fs->unflip_event_id);
+    else
+        (*screen_priv->info->unflip) (screen, fs->unflip_event_id);
 }
 
 static void
