@@ -72,6 +72,7 @@ typedef enum {
     OPTION_USE_GAMMA_LUT,
     OPTION_ASYNC_FLIP_SECONDARIES,
     OPTION_TEARFREE,
+    OPTION_PER_CRTC_FLIP,
 } modesettingOpts;
 
 typedef struct
