@@ -161,6 +161,7 @@ static const OptionInfoRec Options[] = {
     {OPTION_USE_GAMMA_LUT, "UseGammaLUT", OPTV_BOOLEAN, {0}, FALSE},
     {OPTION_ASYNC_FLIP_SECONDARIES, "AsyncFlipSecondaries", OPTV_BOOLEAN, {0}, FALSE},
     {OPTION_TEARFREE, "TearFree", OPTV_BOOLEAN, {0}, FALSE},
+    {OPTION_PER_CRTC_FLIP, "PerCRTCFlip", OPTV_BOOLEAN, {0}, FALSE},
     {-1, NULL, OPTV_NONE, {0}, FALSE}
 };
 
@@ -1468,6 +1469,15 @@ PreInit(ScrnInfoPtr pScrn, int flags)
     if (!cap_universal_planes) {
         cap_universal_planes = !drmSetClientCap(ms->fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
     }
+
+    /* Per-CRTC page flips (XiS): let a compositor page-flip one output at a time
+     * instead of only a whole-screen buffer to every CRTC. Off by default until
+     * it is proven stable; the whole-screen flip path is unchanged when off. It
+     * additionally requires an atomic-capable driver (gated in
+     * ms_present_screen_init) -- and in practice Option "Atomic" "True", since a
+     * per-CRTC flip of a tiled buffer only lands on the atomic commit path. */
+    ms->drmmode.per_crtc_flip =
+        xf86ReturnOptValBool(ms->drmmode.Options, OPTION_PER_CRTC_FLIP, FALSE);
 
     /* TearFree requires glamor and, if PageFlip is enabled, universal planes */
     if (xf86ReturnOptValBool(ms->drmmode.Options, OPTION_TEARFREE, TRUE)) {
