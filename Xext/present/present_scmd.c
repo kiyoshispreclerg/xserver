@@ -243,12 +243,18 @@ present_read_into_result(ScreenPtr screen, DrawablePtr src,
  * two stay exactly in sync (every punched pixel is refilled, and vice versa).
  */
 static Bool
-present_flip_overlay_valid(present_flip_state_ptr fs, int depth, int bpp,
-                           BoxPtr box)
+present_flip_overlay_valid(ScreenPtr screen, present_flip_state_ptr fs,
+                           int depth, int bpp, BoxPtr box)
 {
     PixmapPtr fp = fs->flip_pixmap;
 
-    return fp && fs->crtc && present_crtc_box(fs->crtc, box) &&
+    /* Only per-CRTC flips need substituting. A whole-screen flip redirects the
+     * root window's pixmap to the flip buffer, so a plain root GetImage already
+     * reads the flipped content -- overlaying it again would be redundant work
+     * on every capture of a fullscreen flipping app (e.g. a game while OBS is
+     * recording). */
+    return fp && fs->crtc && present_flip_is_per_crtc(screen, fp) &&
+           present_crtc_box(fs->crtc, box) &&
            fp->drawable.depth == depth &&
            fp->drawable.bitsPerPixel == bpp;
 }
@@ -302,7 +308,7 @@ present_flip_overlay_image(DrawablePtr pDrawable, int sx, int sy, int w, int h,
         BoxRec      box;
         int         ix0, iy0, ix1, iy1, sw, sh;
 
-        if (!present_flip_overlay_valid(fs, depth, pDrawable->bitsPerPixel, &box))
+        if (!present_flip_overlay_valid(screen, fs, depth, pDrawable->bitsPerPixel, &box))
             continue;
 
         /* Intersect the requested region with this CRTC's rectangle. */
@@ -384,7 +390,7 @@ present_flip_getimage(DrawablePtr pDrawable, int sx, int sy, int w, int h,
         BoxRec      box;
         RegionRec   r;
 
-        if (!present_flip_overlay_valid(fs, depth, pDrawable->bitsPerPixel, &box))
+        if (!present_flip_overlay_valid(screen, fs, depth, pDrawable->bitsPerPixel, &box))
             continue;
 
         /* Clip to the requested rect before subtracting. */
