@@ -646,10 +646,15 @@ ms_present_screen_init(ScreenPtr screen)
 
     /* Per-CRTC page flips switch a CRTC to a framebuffer of its own size (a
      * different stride than the shared screen framebuffer), which is only
-     * reliable under atomic KMS. */
-    if (ms->atomic_modeset_capable) {
+     * reliable under atomic KMS. Off by default (Option "PerCRTCFlip"); when
+     * disabled the whole-screen flip path is used, exactly as before. */
+    if (ms->atomic_modeset_capable && ms->drmmode.per_crtc_flip) {
         info.capable_flip_crtc = TRUE;
-        xf86DrvMsg(screen->myNum, X_INFO, "Per-CRTC page flip capable\n");
+        xf86DrvMsg(screen->myNum, X_INFO, "Per-CRTC page flip enabled\n");
+    } else if (ms->drmmode.per_crtc_flip) {
+        xf86DrvMsg(screen->myNum, X_WARNING,
+                   "Per-CRTC page flip requested but needs an atomic-capable "
+                   "driver; using whole-screen flips\n");
     }
 
     return present_screen_init(screen, &info);
