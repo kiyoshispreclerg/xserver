@@ -995,17 +995,36 @@ present_scmd_can_window_flip(WindowPtr window)
         !present_pixmap_is_flip(screen_priv, window_pixmap))
         return FALSE;
 
-    /* Check for full-screen window */
-    if (!RegionEqual(&window->clipList, &root->winSize)) {
-        return FALSE;
+    /* Accept a whole-screen window, or -- on drivers that advertise per-CRTC
+     * flip support -- a window covering exactly one CRTC's scanout box.
+     *
+     * This predicate gates the scanout-capable modifier set advertised to the GL
+     * client (via get_drawable_modifiers() -> DRI3 GetSupportedModifiers). A
+     * per-output compositor draws one CRTC-sized window per output; unless this
+     * says such a window is flippable, Mesa allocates a render-only (tiled/
+     * compressed) buffer and the later flip is rejected for buffer format, so the
+     * frame silently falls back to a copy. Must stay in sync with the geometry
+     * gate in present_check_flip(). The authoritative flip decision still runs
+     * there and re-validates everything, so widening this never forces a flip. */
+    if (RegionEqual(&window->clipList, &root->winSize))
+        return window->drawable.x == 0 && window->drawable.y == 0;
+
+    if (present_flip_can_crtc(screen_priv)) {
+        rrScrPrivPtr rr = rrGetScrPriv(screen);
+        int i;
+
+        if (rr) {
+            for (i = 0; i < rr->numCrtcs; i++) {
+                BoxRec crtc_box;
+
+                if (present_crtc_box(rr->crtcs[i], &crtc_box) &&
+                    present_region_is_box(&window->clipList, &crtc_box))
+                    return TRUE;
+            }
+        }
     }
 
-    /* Does the window match the pixmap exactly? */
-    if (window->drawable.x != 0 || window->drawable.y != 0) {
-        return FALSE;
-    }
-
-    return TRUE;
+    return FALSE;
 }
 
 /*
