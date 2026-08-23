@@ -38,10 +38,14 @@
 
 #include "dix/dix_priv.h"
 #include "dix/request_priv.h"
+#include "include/dix.h"               /* dixLookupWindow */
 #include "include/dixstruct.h"
+#include "include/list.h"
 #include "include/os.h"
+#include "include/resource.h"
 #include "include/scrnintstr.h"
 #include "include/randrstr.h"
+#include "include/windowstr.h"
 #include "miext/extinit_priv.h"
 #include "Xext/randr/randrstr_priv.h"       /* VERIFY_RR_CRTC, rrGetScrPriv */
 
@@ -62,6 +66,153 @@ XInputScaleActive(void)
 }
 
 /* ------------------------------------------------------------------ *
+ *  XISConfineNotify event delivery
+ *
+ *  A flat list of (client, window, eventMask) listeners, mirroring
+ *  XFixes's cursor-notify listener list (Xext/xfixes/cursor.c) rather than
+ *  RandR's own per-window event selection machinery: confinement is a
+ *  screen-wide concept, not scoped to a particular window's hierarchy, so
+ *  there is no need for anything heavier.
+ * ------------------------------------------------------------------ */
+
+typedef struct _xis_listener {
+    struct xorg_list entry;
+    ClientPtr client;
+    WindowPtr window;
+    XID clientResource;
+    CARD32 eventMask;
+} xis_listener_rec, *xis_listener_ptr;
+
+static struct xorg_list xis_listeners;
+static RESTYPE xis_client_type;
+static RESTYPE xis_window_type;
+static int xis_event_base;
+
+static int
+xis_free_client(void *data, XID id)
+{
+    xis_listener_ptr old = data;
+    xis_listener_ptr e;
+
+    xorg_list_for_each_entry(e, &xis_listeners, entry) {
+        if (e == old) {
+            xorg_list_del(&e->entry);
+            free(e);
+            break;
+        }
+    }
+    return Success;
+}
+
+static int
+xis_free_window(void *data, XID id)
+{
+    WindowPtr window = data;
+    xis_listener_ptr e, next;
+
+    xorg_list_for_each_entry_safe(e, next, &xis_listeners, entry) {
+        if (e->window == window)
+            FreeResource(e->clientResource, 0);
+    }
+    return Success;
+}
+
+static int
+XISSelectInput(ClientPtr client, WindowPtr window, CARD32 eventMask)
+{
+    xis_listener_ptr e;
+
+    if (!eventMask) {
+        xorg_list_for_each_entry(e, &xis_listeners, entry) {
+            if (e->client == client && e->window == window) {
+                FreeResource(e->clientResource, 0);
+                break;
+            }
+        }
+        return Success;
+    }
+
+    xorg_list_for_each_entry(e, &xis_listeners, entry) {
+        if (e->client == client && e->window == window) {
+            e->eventMask = eventMask;
+            return Success;
+        }
+    }
+
+    e = calloc(1, sizeof(*e));
+    if (!e)
+        return BadAlloc;
+
+    e->client = client;
+    e->window = window;
+    e->clientResource = FakeClientID(client->index);
+    e->eventMask = eventMask;
+
+    /* Resource hanging off the window so we notice it being destroyed;
+     * skip if some other listener already added one for this window. */
+    void *val;
+    if (dixLookupResourceByType(&val, window->drawable.id, xis_window_type,
+                                serverClient, DixGetAttrAccess) != Success) {
+        if (!AddResource(window->drawable.id, xis_window_type, window)) {
+            free(e);
+            return BadAlloc;
+        }
+    }
+
+    if (!AddResource(e->clientResource, xis_client_type, e))
+        return BadAlloc;
+
+    xorg_list_append(&e->entry, &xis_listeners);
+    return Success;
+}
+
+/* Notify every listener that this CRTC's confinement box was just set or
+ * reset. Called from the single choke point each direction of that state
+ * change actually goes through (ProcXISSetCrtcConfine, xis_crtc_reset). */
+static void
+xis_notify_confine(RRCrtcPtr crtc)
+{
+    xis_listener_ptr e;
+
+    xorg_list_for_each_entry(e, &xis_listeners, entry) {
+        if (!(e->eventMask & XISConfineNotifyMask))
+            continue;
+
+        xXISConfineNotifyEvent ev = {
+            .type = xis_event_base + XISConfineNotify,
+            .active = crtc->confine_active ? 1 : 0,
+            .window = e->window->drawable.id,
+            .crtc = crtc->id,
+            .timestamp = currentTime.milliseconds,
+        };
+
+        if (crtc->confine_active) {
+            ev.x = crtc->confine_box.x1;
+            ev.y = crtc->confine_box.y1;
+            ev.width = crtc->confine_box.x2 - crtc->confine_box.x1;
+            ev.height = crtc->confine_box.y2 - crtc->confine_box.y1;
+        }
+
+        WriteEventsToClient(e->client, 1, (xEvent *) &ev);
+    }
+}
+
+static void _X_COLD
+SXISConfineNotifyEvent(xXISConfineNotifyEvent *from, xXISConfineNotifyEvent *to)
+{
+    to->type = from->type;
+    to->active = from->active;
+    cpswaps(from->sequenceNumber, to->sequenceNumber);
+    cpswapl(from->window, to->window);
+    cpswapl(from->crtc, to->crtc);
+    cpswaps(from->x, to->x);
+    cpswaps(from->y, to->y);
+    cpswaps(from->width, to->width);
+    cpswaps(from->height, to->height);
+    cpswapl(from->timestamp, to->timestamp);
+}
+
+/* ------------------------------------------------------------------ *
  *  Per-CRTC state helpers
  * ------------------------------------------------------------------ */
 
@@ -74,6 +225,7 @@ xis_crtc_reset(RRCrtcPtr crtc)
     crtc->confine_client = NULL;
     if (xis_active_count > 0)
         xis_active_count--;
+    xis_notify_confine(crtc);
 }
 
 /* Physical (scanout) bounding box of a CRTC, in desktop coordinates. */
@@ -351,6 +503,7 @@ ProcXISSetCrtcConfine(ClientPtr client)
     crtc->confine_active = TRUE;
     crtc->confine_client = client;
     crtc->confine_box = box;
+    xis_notify_confine(crtc);
     return Success;
 }
 
@@ -397,6 +550,27 @@ ProcXISResetCrtcConfine(ClientPtr client)
 }
 
 static int
+ProcXISSelectInput(ClientPtr client)
+{
+    WindowPtr window;
+
+    X_REQUEST_HEAD_STRUCT(xXISSelectInputReq);
+    X_REQUEST_FIELD_CARD32(window);
+    X_REQUEST_FIELD_CARD32(eventMask);
+
+    int rc = dixLookupWindow(&window, stuff->window, client, DixGetAttrAccess);
+    if (rc != Success)
+        return rc;
+
+    if (stuff->eventMask & ~(CARD32) XISConfineNotifyMask) {
+        client->errorValue = stuff->eventMask;
+        return BadValue;
+    }
+
+    return XISSelectInput(client, window, stuff->eventMask);
+}
+
+static int
 ProcXISDispatch(ClientPtr client)
 {
     REQUEST(xReq);
@@ -406,6 +580,7 @@ ProcXISDispatch(ClientPtr client)
     case X_XISSetCrtcConfine:   return ProcXISSetCrtcConfine(client);
     case X_XISGetCrtcConfine:   return ProcXISGetCrtcConfine(client);
     case X_XISResetCrtcConfine: return ProcXISResetCrtcConfine(client);
+    case X_XISSelectInput:      return ProcXISSelectInput(client);
     default:                    return BadRequest;
     }
 }
@@ -422,12 +597,20 @@ XInputScaleExtensionInit(void)
     if (noXInputScaleExtension)
         return;
 
+    xorg_list_init(&xis_listeners);
+    xis_client_type = CreateNewResourceType(xis_free_client, "XISClient");
+    xis_window_type = CreateNewResourceType(xis_free_window, "XISWindow");
+    if (!xis_client_type || !xis_window_type) {
+        noXInputScaleExtension = TRUE;
+        return;
+    }
+
     if (!AddCallback(&ClientStateCallback, xis_client_state, NULL)) {
         noXInputScaleExtension = TRUE;
         return;
     }
 
-    ext = AddExtension(XIS_EXTENSION_NAME, 0, 0,
+    ext = AddExtension(XIS_EXTENSION_NAME, XISNumberEvents, 0,
                        ProcXISDispatch, ProcXISDispatch,
                        NULL, StandardMinorOpcode);
     if (!ext) {
@@ -435,6 +618,10 @@ XInputScaleExtensionInit(void)
         noXInputScaleExtension = TRUE;
         return;
     }
+
+    xis_event_base = ext->eventBase;
+    EventSwapVector[xis_event_base + XISConfineNotify] =
+        (EventSwapPtr) SXISConfineNotifyEvent;
 
     /* Wrap ConstrainCursorHarder on every screen so the pointer is confined
      * to the compositor-declared boxes while any are active (see
