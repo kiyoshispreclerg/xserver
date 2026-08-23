@@ -65,10 +65,24 @@ Extension name: `X-INPUT-SCALE`, version 1.0. Wire definitions in
 | 1 | `XISSetCrtcConfine(crtc, x, y, width, height)` | confine the cursor to this desktop-space box while over `crtc`; must fit inside the CRTC's physical scanout box or `BadMatch` |
 | 2 | `XISGetCrtcConfine(crtc)` → `(active, x, y, width, height)` | read the current confinement box |
 | 3 | `XISResetCrtcConfine(crtc)` | disable confinement for this CRTC |
+| 4 | `XISSelectInput(window, eventMask)` | (un)subscribe `window` to `XISConfineNotify` events; `eventMask` of 0 cancels |
 
 Coordinates are absolute desktop-space pixels, the same convention RandR
 itself uses for CRTC position/size — no matrix, no transform, just a
 rectangle.
+
+**Event:** `XISConfineNotify(crtc, active, x, y, width, height, timestamp)` —
+sent to every window that selected `XISConfineNotifyMask` via `XISSelectInput`
+whenever a CRTC's confinement box is set or reset. Fields have the same
+meaning as `XISGetCrtcConfine`'s reply. This exists so a consumer (a window
+manager doing its own per-output workarea, a toolkit positioning popups, a
+screen-capture tool) doesn't have to poll `XISGetCrtcConfine` on every CRTC to
+notice a change — the same reasoning RandR itself uses for
+`RRCrtcChangeNotify` rather than making clients poll `XRRGetCrtcInfo`. This is
+also the intended integration point for anything outside this project's own
+KWin fork that wants to become "XiS-aware" without linking against it deeply:
+subscribe, and react to a handful of events instead of guessing from
+`_NET_WORKAREA` or RandR geometry.
 
 ## Server implementation
 
