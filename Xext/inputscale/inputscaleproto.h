@@ -31,7 +31,15 @@
 #define X_XISSetCrtcConfine     1
 #define X_XISGetCrtcConfine     2
 #define X_XISResetCrtcConfine   3
-#define XISNumberRequests       4
+#define X_XISSelectInput        4
+#define XISNumberRequests       5
+
+/* events */
+#define XISConfineNotify         0
+#define XISNumberEvents          1
+
+/* XISSelectInput event mask */
+#define XISConfineNotifyMask    (1 << XISConfineNotify)
 
 /* ------------------------------------------------------------------ *
  *  Requests
@@ -81,6 +89,18 @@ typedef struct {
 } xXISResetCrtcConfineReq;
 #define sz_xXISResetCrtcConfineReq 8
 
+/* Select delivery of XISConfineNotify events (see below) to this window
+ * while it, or any of its ancestors up to the root, exists. eventMask of 0
+ * cancels a prior selection. */
+typedef struct {
+    CARD8   reqType;
+    CARD8   xisReqType;         /* X_XISSelectInput */
+    CARD16  length;
+    CARD32  window;
+    CARD32  eventMask;
+} xXISSelectInputReq;
+#define sz_xXISSelectInputReq 12
+
 /* ------------------------------------------------------------------ *
  *  Replies (32-byte reply header)
  * ------------------------------------------------------------------ */
@@ -114,5 +134,30 @@ typedef struct {
     CARD32  pad4;
 } xXISGetCrtcConfineReply;
 #define sz_xXISGetCrtcConfineReply 32
+
+/* ------------------------------------------------------------------ *
+ *  Events
+ * ------------------------------------------------------------------ */
+
+/* Sent to every window that selected XISConfineNotifyMask via
+ * X_XISSelectInput whenever a CRTC's confinement box is set or reset -
+ * i.e. exactly the events that would invalidate a cached GetCrtcConfine
+ * reply for that CRTC. x/y/width/height are only meaningful when
+ * active != 0, same as in xXISGetCrtcConfineReply. */
+typedef struct {
+    BYTE    type;                /* XISEventBase + XISConfineNotify */
+    CARD8   active;               /* 0 = no confinement, 1 = active */
+    CARD16  sequenceNumber;
+    Window  window;               /* window this was selected on */
+    CARD32  crtc;                 /* RRCrtc */
+    INT16   x;
+    INT16   y;
+    CARD16  width;
+    CARD16  height;
+    Time    timestamp;
+    CARD32  pad1;
+    CARD32  pad2;
+} xXISConfineNotifyEvent;
+#define sz_xXISConfineNotifyEvent 32
 
 #endif /* _XSERVER_INPUTSCALEPROTO_H */
