@@ -26,6 +26,7 @@
 #include "dix/dix_priv.h"
 #include "dix/request_priv.h"
 #include "dix/screenint_priv.h"
+#include "dix/settings_priv.h"
 #include "include/syncsdk.h"
 #include "os/client_priv.h"
 #include "Xext/randr/randrstr_priv.h"
@@ -104,19 +105,33 @@ proc_dri3_query_version(ClientPtr client)
         .majorVersion = SERVER_DRI3_MAJOR_VERSION,
     };
 
-    DIX_FOR_EACH_SCREEN({
-        const uint32_t screenVersion = dri3_screen_minor_version(walkScreen);
+    if (dixSettingDRI3VersionFromFirstScreen) {
+        /*
+         * Opt-in legacy behaviour: answer for a single screen, the first GPU
+         * screen if there is one and the first regular screen otherwise.
+         * Clients that then use a screen supporting less will fail, so this is
+         * only useful when they are known never to touch such a screen.
+         */
+        if (screenInfo.numGPUScreens > 0)
+            minorVersion = dri3_screen_minor_version(screenInfo.gpuscreens[0]);
+        else if (screenInfo.numScreens > 0)
+            minorVersion = dri3_screen_minor_version(screenInfo.screens[0]);
+    }
+    else {
+        DIX_FOR_EACH_SCREEN({
+            const uint32_t screenVersion = dri3_screen_minor_version(walkScreen);
 
-        if (screenVersion < minorVersion)
-            minorVersion = screenVersion;
-    });
+            if (screenVersion < minorVersion)
+                minorVersion = screenVersion;
+        });
 
-    DIX_FOR_EACH_GPU_SCREEN({
-        const uint32_t screenVersion = dri3_screen_minor_version(walkScreen);
+        DIX_FOR_EACH_GPU_SCREEN({
+            const uint32_t screenVersion = dri3_screen_minor_version(walkScreen);
 
-        if (screenVersion < minorVersion)
-            minorVersion = screenVersion;
-    });
+            if (screenVersion < minorVersion)
+                minorVersion = screenVersion;
+        });
+    }
 
     reply.minorVersion = minorVersion;
 

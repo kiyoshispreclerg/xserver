@@ -711,6 +711,17 @@ carrying
 (the standard \(lqno data\(rq reply), so middle-click paste produces nothing.
 The CLIPBOARD selection (Ctrl+C/V) is unaffected.
 Disabled by default.
+.TP 7
+.BI "Option \*qDRI3VersionFromFirstScreen\*q  \*q" boolean \*q
+Report the DRI3 version supported by a single screen \(em the first GPU screen
+if there is one, the first regular screen otherwise \(em instead of the lowest
+version supported by all of them.
+The DRI3 version is negotiated once for the whole server while a client may use
+DRI3 on any screen, so this makes the server claim support that some screen
+cannot deliver, and clients using such a screen will fail.
+Only useful when every DRI3 client is known to use one screen, and that screen
+supports more than another one does.
+Disabled by default.
 .SH "MODULE SECTION"
 The
 .B Module
