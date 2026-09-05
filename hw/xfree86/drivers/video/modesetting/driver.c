@@ -328,16 +328,28 @@ check_outputs(int fd, int *count)
     return ret;
 }
 
+/*
+ * If node_ret is not NULL, it is set to the path of the DRM node that was
+ * actually opened, which is not necessarily what was passed in as dev:
+ * open_hw() scans for a usable node when dev is NULL, and it may as well
+ * have been given a symlink. The caller has to drmFree() the result.
+ */
 static Bool
-probe_hw(const char *dev, struct xf86_platform_device *platform_dev)
+probe_hw(const char *dev, struct xf86_platform_device *platform_dev,
+         char **node_ret)
 {
     int fd;
+
+    if (node_ret)
+        *node_ret = NULL;
 
 #ifdef XF86_PDEV_SERVER_FD
     if (platform_dev && (platform_dev->flags & XF86_PDEV_SERVER_FD)) {
         fd = xf86_platform_device_odev_attributes(platform_dev)->fd;
         if (fd == -1)
             return FALSE;
+        if (node_ret)
+            *node_ret = drmGetDeviceNameFromFd2(fd);
         return check_outputs(fd, NULL);
     }
 #endif
@@ -346,6 +358,8 @@ probe_hw(const char *dev, struct xf86_platform_device *platform_dev)
     if (fd != -1) {
         int ret = check_outputs(fd, NULL);
 
+        if (node_ret)
+            *node_ret = drmGetDeviceNameFromFd2(fd);
         close(fd);
         return ret;
     }
@@ -503,7 +517,7 @@ ms_platform_probe(DriverPtr driver,
     if (flags & PLATFORM_PROBE_GPU_SCREEN)
         scr_flags = XF86_ALLOCATE_GPU_SCREEN;
 
-    if (probe_hw(path, dev)) {
+    if (probe_hw(path, dev, NULL)) {
         scrn = xf86AllocateScreen(driver, scr_flags);
         if (xf86IsEntitySharable(entity_num))
             xf86SetEntityShared(entity_num);
@@ -544,8 +558,20 @@ Probe(DriverPtr drv, int flags)
         int entity_num = -1;
         ScrnInfoPtr scrn = NULL;
         const char *dev = xf86FindOptionValue(devSections[i]->options, "kmsdev");
+        char *node = NULL;
 
-        if (probe_hw(dev, NULL)) {
+        if (probe_hw(dev, NULL, &node)) {
+            /*
+             * xf86ClaimFbSlot() can only tell whether this device is already
+             * claimed by comparing device paths, and for an autoconfigured
+             * section it has to assume the default node open_hw() would pick.
+             * Record the node that was really opened instead, so that a device
+             * another driver has already taken is properly detected.
+             */
+            if (node)
+                devSections[i]->options =
+                    xf86AddNewOption(devSections[i]->options, "kmsdev", node);
+
             entity_num = xf86ClaimFbSlot(drv, 0, devSections[i], TRUE);
         }
 
@@ -559,9 +585,11 @@ Probe(DriverPtr drv, int flags)
             scrn->Probe = Probe;
 
             xf86DrvMsg(scrn->scrnIndex, X_INFO,
-                       "using %s\n", dev ? dev : "default device");
+                       "using %s\n", dev ? dev : node ? node : "default device");
             ms_setup_entity(scrn, entity_num);
         }
+
+        drmFree(node);
     }
 
     free(devSections);
