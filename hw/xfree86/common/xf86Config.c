@@ -655,6 +655,7 @@ typedef enum {
     FLAG_ALLOW_BYTE_SWAPPED_CLIENTS,
     FLAG_SINGLE_DRIVER,
     FLAG_DISABLE_PRIMARY_SELECTION,
+    FLAG_DRI3_VERSION_FROM_FIRST_SCREEN,
 } FlagValues;
 
 /**
@@ -720,6 +721,8 @@ static OptionInfoRec FlagOptions[] = {
      {0}, FALSE},
     {FLAG_DISABLE_PRIMARY_SELECTION, "DisablePrimarySelection", OPTV_BOOLEAN,
      {0}, FALSE},
+    {FLAG_DRI3_VERSION_FROM_FIRST_SCREEN, "DRI3VersionFromFirstScreen", OPTV_BOOLEAN,
+     {0}, FALSE},
     {-1, NULL, OPTV_NONE,
      {0}, FALSE},
 };
@@ -767,6 +770,15 @@ configServerFlags(XF86ConfFlagsPtr flagsconf, XF86OptionPtr layoutopts)
     }
     if (dixSettingAllowByteSwappedClients) {
         LogMessageVerb(X_CONFIG, 1, "Allowing byte-swapped clients\n");
+    }
+
+    bv = FALSE;
+    if (xf86GetOptValBool(FlagOptions, FLAG_DRI3_VERSION_FROM_FIRST_SCREEN, &bv)) {
+        dixSettingDRI3VersionFromFirstScreen = bv;
+    }
+    if (dixSettingDRI3VersionFromFirstScreen) {
+        LogMessageVerb(X_CONFIG, 1,
+                       "Reporting the DRI3 version of the first screen only\n");
     }
 
     if (xf86IsOptionSet(FlagOptions, FLAG_AUTO_ADD_DEVICES)) {
