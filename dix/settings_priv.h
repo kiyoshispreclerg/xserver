@@ -15,5 +15,6 @@
  */
 
 extern bool dixSettingAllowByteSwappedClients;
+extern bool dixSettingDRI3VersionFromFirstScreen;
 
 #endif
