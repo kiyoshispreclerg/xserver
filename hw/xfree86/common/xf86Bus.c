@@ -740,17 +740,30 @@ xf86CheckSlot(const void *ptr, BusType type)
 #endif
         const char *msOther = NULL;
         const char *fbOther = NULL;
+        const char *owner;
 
         if (pent->numInstances <= 0) {
-        /* All devices are unclaimed, ignore this entity */
-            continue;
+        /*
+         * No device section is attached to this entity: either it was
+         * claimed without one (an automatically added GPU screen does that),
+         * or all of its devices were released. The latter also resets the
+         * bus type to BUS_NONE, so a PCI or platform entity without devices
+         * is still a live claim and must be checked for collisions. It just
+         * has no identifier to name in the messages below.
+         */
+            if ((pent->bus.type != BUS_PCI) && (pent->bus.type != BUS_PLATFORM))
+                continue;
+            owner = pent->driver ? pent->driver->driverName : "another driver";
+        }
+        else {
+            owner = pent->devices[0]->identifier;
         }
 
         if ((fbPath != NULL) && (*fbPath == '\0')) {
             /* Autoconfigured fbdev device is incompatible with anything */
             LogMessageVerb(X_INFO, 1,
                 "\"%s\" must be the only device, but \"%s\" is present.\n",
-                fb_ptr->identifier, pent->devices[0]->identifier);
+                fb_ptr->identifier, owner);
             return FALSE;
         }
 
@@ -772,7 +785,7 @@ xf86CheckSlot(const void *ptr, BusType type)
                 LogMessageVerb(X_INFO, 1,
                     "  PCI bus id %u@%u:%u:%u has already been claimed by \"%s\".\n",
                     pci_ptr->domain, pci_ptr->bus, pci_ptr->dev, pci_ptr->func, 
-                    pent->devices[0]->identifier);
+                    owner);
                 return FALSE;
             }
             else
@@ -792,7 +805,7 @@ xf86CheckSlot(const void *ptr, BusType type)
                     /* fbdev without busID is incompatible with other types */
                     LogMessageVerb(X_INFO, 1,
                         " Only fbdev without PCI bus id can be claimed after \"%s\".\n",
-                        pent->devices[0]->identifier);
+                        owner);
                     return FALSE;
                 }
                 /* Examine the first device only */
@@ -801,7 +814,7 @@ xf86CheckSlot(const void *ptr, BusType type)
                     /* Autoconfigured, reject */
                     LogMessageVerb(X_INFO, 1,
                         " Can\'t claim anything after \"%s\".\n",
-                        pent->devices[0]->identifier);
+                        owner);
                     return FALSE;
                 }
                 if (strcmp(fbPath, fbOther)) {
@@ -812,7 +825,7 @@ xf86CheckSlot(const void *ptr, BusType type)
                     /* This framebuffer device has been claimed already */
                     LogMessageVerb(X_INFO, 1,
                         " Framebuffer device \"%s\" has already been claimed by \"%s\".\n",
-                        fbPath, pent->devices[0]->identifier);
+                        fbPath, owner);
                     return FALSE;
                 }
             }
@@ -840,7 +853,7 @@ xf86CheckSlot(const void *ptr, BusType type)
             /* This DRI device has been claimed already */
                     LogMessageVerb(X_INFO, 1,
                         " DRI device \"%s\" has already been claimed by \"%s\".\n",
-                        msPath, pent->devices[0]->identifier);
+                        msPath, owner);
             return FALSE;
         }
     }
