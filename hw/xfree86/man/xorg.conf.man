@@ -692,6 +692,17 @@ Allow clients with a different byte-order than the server. Disabled by default.
 Only the first successfully probed driver is allowed to add screens to the current layout, others may
 add secondary GPU screens only (e.g., if non-primary GPUs are used for offloading).
 Disabled by default.
+.TP 7
+.BI "Option \*qDRI3VersionFromFirstScreen\*q  \*q" boolean \*q
+Report the DRI3 version supported by a single screen \(em the first GPU screen
+if there is one, the first regular screen otherwise \(em instead of the lowest
+version supported by all of them.
+The DRI3 version is negotiated once for the whole server while a client may use
+DRI3 on any screen, so this makes the server claim support that some screen
+cannot deliver, and clients using such a screen will fail.
+Only useful when every DRI3 client is known to use one screen, and that screen
+supports more than another one does.
+Disabled by default.
 .SH "MODULE SECTION"
 The
 .B Module

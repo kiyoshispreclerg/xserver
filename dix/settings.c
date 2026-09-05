@@ -16,4 +16,5 @@
 #include "dix/settings_priv.h"
 
 bool dixSettingAllowByteSwappedClients = false;
+bool dixSettingDRI3VersionFromFirstScreen = false;
 char *dixSettingSeatId = NULL;
