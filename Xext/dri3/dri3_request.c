@@ -74,6 +74,23 @@ dri3_screen_can_one_point_four(ScreenPtr screen)
         dri3->info->import_syncobj;
 }
 
+/*
+ * The version is negotiated once for the whole server, but a client may use
+ * DRI3 on any screen, so we can only offer what the weakest screen supports.
+ */
+static uint32_t
+dri3_screen_minor_version(ScreenPtr screen)
+{
+    if (!dri3_screen_can_one_point_one(screen))
+        return 0;
+    if (!dri3_screen_can_one_point_two(screen))
+        return 1;
+    if (!dri3_screen_can_one_point_four(screen))
+        return 2;
+
+    return 4;
+}
+
 static int
 proc_dri3_query_version(ClientPtr client)
 {
@@ -81,46 +98,27 @@ proc_dri3_query_version(ClientPtr client)
     X_REQUEST_FIELD_CARD32(majorVersion);
     X_REQUEST_FIELD_CARD32(minorVersion);
 
+    uint32_t minorVersion = SERVER_DRI3_MINOR_VERSION;
+
     xDRI3QueryVersionReply reply = {
         .majorVersion = SERVER_DRI3_MAJOR_VERSION,
-        .minorVersion = SERVER_DRI3_MINOR_VERSION
     };
 
     DIX_FOR_EACH_SCREEN({
-        if (!dri3_screen_can_one_point_one(walkScreen)) {
-            reply.minorVersion = 0;
-            break;
-        }
-        if (!dri3_screen_can_one_point_two(walkScreen)) {
-            reply.minorVersion = 1;
-            break;
-        }
-        if (!dri3_screen_can_one_point_four(walkScreen)) {
-            reply.minorVersion = 2;
-            break;
-        } else {
-            reply.minorVersion = 4;
-            break;
-        }
+        const uint32_t screenVersion = dri3_screen_minor_version(walkScreen);
+
+        if (screenVersion < minorVersion)
+            minorVersion = screenVersion;
     });
 
     DIX_FOR_EACH_GPU_SCREEN({
-        if (!dri3_screen_can_one_point_one(walkScreen)) {
-            reply.minorVersion = 0;
-            break;
-        }
-        if (!dri3_screen_can_one_point_two(walkScreen)) {
-            reply.minorVersion = 1;
-            break;
-        }
-        if (!dri3_screen_can_one_point_four(walkScreen)) {
-            reply.minorVersion = 2;
-            break;
-        } else {
-            reply.minorVersion = 4;
-            break;
-        }
+        const uint32_t screenVersion = dri3_screen_minor_version(walkScreen);
+
+        if (screenVersion < minorVersion)
+            minorVersion = screenVersion;
     });
+
+    reply.minorVersion = minorVersion;
 
     /* From DRI3 proto:
      *
