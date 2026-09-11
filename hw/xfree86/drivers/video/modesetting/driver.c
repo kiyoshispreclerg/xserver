@@ -750,10 +750,18 @@ ms_tearfree_update_damages(ScreenPtr pScreen)
             for (i = 0; i < ARRAY_SIZE(trf->buf); i++)
                 RegionUnion(&trf->buf[i].dmg, &trf->buf[i].dmg, &region);
         } else {
-            /* Just notify the kernel of the damages if TearFree isn't used */
+            /* Just notify the kernel of the damages if TearFree isn't used on
+             * this CRTC, against whatever it actually scans out (rotation
+             * shadow, PRIME buffer, or the shared fb at its offset) -- the
+             * same as dispatch_dirty() does when TearFree is not possible. */
+            uint32_t fb_id;
+            int x, y;
+
+            drmmode_crtc_get_fb_id(crtc, &fb_id, &x, &y);
             dispatch_damages(scrn, crtc, &region,
-                             pScreen->GetScreenPixmap(pScreen),
-                             NULL, ms->drmmode.fb_id, 0, 0);
+                             crtc->rotatedPixmap ? crtc->rotatedPixmap
+                                                 : pScreen->GetScreenPixmap(pScreen),
+                             NULL, fb_id, x, y);
         }
     }
     DamageEmpty(ms->damage);
@@ -768,7 +776,7 @@ ms_tearfree_do_flips(ScreenPtr pScreen)
     modesettingPtr ms = modesettingPTR(scrn);
     int c;
 
-    if (!ms->drmmode.tearfree_enable)
+    if (!ms->drmmode.tearfree_possible)
         return;
 
     for (c = 0; c < xf86_config->num_crtc; c++) {
@@ -969,7 +977,7 @@ msBlockHandler(ScreenPtr pScreen, void *timeout)
     pScreen->BlockHandler = msBlockHandler;
     if (pScreen->isGPU && !ms->drmmode.reverse_prime_offload_mode)
         dispatch_secondary_dirty(pScreen);
-    else if (ms->drmmode.tearfree_enable)
+    else if (ms->drmmode.tearfree_possible && ms->damage)
         ms_tearfree_update_damages(pScreen);
     else if (ms->dirty_enabled)
         dispatch_dirty(pScreen);
@@ -1450,15 +1458,19 @@ PreInit(ScrnInfoPtr pScrn, int flags)
     ms->drmmode.per_crtc_flip =
         xf86ReturnOptValBool(ms->drmmode.Options, OPTION_PER_CRTC_FLIP, FALSE);
 
-    /* TearFree requires glamor and, if PageFlip is enabled, universal planes */
+    /* TearFree requires glamor and, if PageFlip is enabled, universal planes.
+     * Where those hold it can be toggled per output at runtime (RandR
+     * property "TearFree"); the Option only sets the default. */
+    /* Atomic modesetting implicitly enables universal planes */
+    ms->drmmode.tearfree_possible = !pScrn->is_gpu && ms->drmmode.glamor_gbm &&
+        (!ms->drmmode.pageflip || ms->atomic_modeset ||
+         !drmSetClientCap(ms->fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1));
     if (xf86ReturnOptValBool(ms->drmmode.Options, OPTION_TEARFREE, TRUE)) {
         if (pScrn->is_gpu) {
             xf86DrvMsg(pScrn->scrnIndex, X_WARNING,
                        "TearFree cannot synchronize PRIME; use 'PRIME Synchronization' instead\n");
         } else if (ms->drmmode.glamor_gbm) {
-            /* Atomic modesetting implicitly enables universal planes */
-            if (!ms->drmmode.pageflip || ms->atomic_modeset ||
-                !drmSetClientCap(ms->fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1)) {
+            if (ms->drmmode.tearfree_possible) {
                 ms->drmmode.tearfree_enable = TRUE;
                 xf86DrvMsg(pScrn->scrnIndex, X_INFO, "TearFree: enabled\n");
             } else {
@@ -1809,7 +1821,7 @@ modesetCreateScreenResources(ScreenPtr pScreen)
 
     err = drmModeDirtyFB(ms->fd, ms->drmmode.fb_id, NULL, 0);
 
-    if ((err != -EINVAL && err != -ENOSYS) || ms->drmmode.tearfree_enable) {
+    if ((err != -EINVAL && err != -ENOSYS) || ms->drmmode.tearfree_possible) {
         ms->damage = DamageCreate(NULL, NULL, DamageReportNone, TRUE,
                                   pScreen, rootPixmap);
 
