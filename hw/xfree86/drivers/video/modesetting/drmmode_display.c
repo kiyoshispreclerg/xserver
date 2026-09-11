@@ -1482,8 +1482,12 @@ drmmode_create_tearfree_shadow(xf86CrtcPtr crtc)
     uint32_t w = crtc->mode.HDisplay, h = crtc->mode.VDisplay;
     int i;
 
-    if (!drmmode->tearfree_enable)
+    /* Not wanted on this CRTC (any more): make sure no buffers linger, since
+     * their mere existence is what marks TearFree active on it. */
+    if (!drmmode_crtc_tearfree_wanted(crtc)) {
+        drmmode_destroy_tearfree_shadow(crtc);
         return TRUE;
+    }
 
     /*
      * A modeset that doesn't change the scanout dimensions — a position change,
@@ -3309,6 +3313,114 @@ drmmode_property_ignore(drmModePropertyPtr prop)
     return FALSE;
 }
 
+/*
+ * Runtime toggles exposed as RandR output properties, set with e.g.
+ *   xrandr --output DP-1 --set TearFree on
+ * Each takes the enum "off", "on" or "auto", where "auto" (the initial value)
+ * follows the corresponding xorg.conf Option. A CRTC's effective setting is
+ * derived from the outputs driving it, see drmmode_crtc_toggle_wanted().
+ */
+static const char *const drmmode_toggle_names[] = { "off", "on", "auto" };
+
+/* Create an "off"/"on"/"auto" property on 'output', initialised to "auto".
+ * Returns the property atom, or None if it could not be created. */
+static Atom
+drmmode_output_create_toggle_property(xf86OutputPtr output, const char *name)
+{
+    Atom prop = dixAddAtom(name);
+    Atom values[ARRAY_SIZE(drmmode_toggle_names)];
+    int i, err;
+
+    if (prop == BAD_RESOURCE)
+        return None;
+
+    for (i = 0; i < ARRAY_SIZE(drmmode_toggle_names); i++)
+        values[i] = dixAddAtom(drmmode_toggle_names[i]);
+
+    err = RRConfigureOutputProperty(output->randr_output, prop,
+                                    FALSE, FALSE, FALSE,
+                                    ARRAY_SIZE(values), (INT32 *) values);
+    if (err != 0) {
+        xf86DrvMsg(output->scrn->scrnIndex, X_ERROR,
+                   "RRConfigureOutputProperty error, %d\n", err);
+        return None;
+    }
+    err = RRChangeOutputProperty(output->randr_output, prop, XA_ATOM, 32,
+                                 PropModeReplace, 1,
+                                 &values[DRMMODE_TOGGLE_AUTO], FALSE, FALSE);
+    if (err != 0) {
+        xf86DrvMsg(output->scrn->scrnIndex, X_ERROR,
+                   "RRChangeOutputProperty error, %d\n", err);
+        return None;
+    }
+    return prop;
+}
+
+/* Decode a toggle property value into DRMMODE_TOGGLE_*, or -1 if invalid. */
+static int
+drmmode_toggle_from_property(RRPropertyValuePtr value)
+{
+    Atom atom;
+    const char *name;
+    int i;
+
+    if (value->type != XA_ATOM || value->format != 32 || value->size != 1)
+        return -1;
+    memcpy(&atom, value->data, sizeof(atom));
+    if (!(name = NameForAtom(atom)))
+        return -1;
+
+    for (i = 0; i < ARRAY_SIZE(drmmode_toggle_names); i++)
+        if (!strcmp(drmmode_toggle_names[i], name))
+            return i;
+    return -1;
+}
+
+/*
+ * Effective value of a toggle for 'crtc': "on" if any output driving it says
+ * on, else the xorg.conf default 'option_default' if any says auto, else off.
+ * 'offset' is the offsetof() of the toggle within drmmode_output_private_rec.
+ */
+static Bool
+drmmode_crtc_toggle_wanted(xf86CrtcPtr crtc, size_t offset, Bool option_default)
+{
+    xf86CrtcConfigPtr config = XF86_CRTC_CONFIG_PTR(crtc->scrn);
+    Bool wanted = FALSE;
+    int i;
+
+    for (i = 0; i < config->num_output; i++) {
+        xf86OutputPtr output = config->output[i];
+        drmmode_output_private_ptr drmmode_output = output->driver_private;
+        int toggle;
+
+        if (output->crtc != crtc || !drmmode_output)
+            continue;
+
+        toggle = *(int *) ((char *) drmmode_output + offset);
+        if (toggle == DRMMODE_TOGGLE_ON)
+            return TRUE;
+        if (toggle == DRMMODE_TOGGLE_AUTO && option_default)
+            wanted = TRUE;
+    }
+    return wanted;
+}
+
+/* Should 'crtc' scan out through TearFree shadow buffers? Decides whether
+ * drmmode_create_tearfree_shadow() builds them; whether TearFree is *active*
+ * on a CRTC is then simply whether those buffers exist. */
+Bool
+drmmode_crtc_tearfree_wanted(xf86CrtcPtr crtc)
+{
+    drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
+    drmmode_ptr drmmode = drmmode_crtc->drmmode;
+
+    return drmmode->tearfree_possible &&
+           drmmode_crtc_toggle_wanted(crtc,
+                                      offsetof(drmmode_output_private_rec,
+                                               tearfree),
+                                      drmmode->tearfree_enable);
+}
+
 static void
 drmmode_output_create_resources(xf86OutputPtr output)
 {
@@ -3383,6 +3495,10 @@ drmmode_output_create_resources(xf86OutputPtr output)
             drmmode_output->ctm = ctm_identity;
         }
     }
+
+    if (drmmode->tearfree_possible)
+        drmmode_output->tearfree_atom =
+            drmmode_output_create_toggle_property(output, "TearFree");
 
     for (i = 0; i < drmmode_output->num_props; i++) {
         drmmode_prop_ptr p = &drmmode_output->props[i];
@@ -3501,6 +3617,38 @@ drmmode_output_set_property(xf86OutputPtr output, Atom property,
                 }
             }
         }
+    }
+
+    
+    if (property != None && property == drmmode_output->tearfree_atom) {
+        ScrnInfoPtr scrn = output->scrn;
+        xf86CrtcPtr crtc = output->crtc;
+        int toggle = drmmode_toggle_from_property(value);
+
+        if (toggle < 0)
+            return FALSE;
+        if (toggle == drmmode_output->tearfree)
+            return TRUE;
+
+        drmmode_output->tearfree = toggle;
+        xf86DrvMsg(scrn->scrnIndex, X_INFO, "TearFree %s on output %s\n",
+                   drmmode_toggle_names[toggle], output->name);
+
+        /* Apply it to the CRTC now: re-setting the current mode rebuilds (or
+         * drops) the shadow buffers through drmmode_create_tearfree_shadow()
+         * and points the scanout at the right framebuffer, draining any
+         * Present flip first -- the same path ms_present_unflip() uses. A
+         * CRTC that is DPMS-off picks it up when it is turned back on. */
+        if (crtc && crtc->enabled && scrn->vtSema) {
+            drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
+
+            if (drmmode_crtc->dpms_mode == DPMSModeOn)
+                crtc->funcs->set_mode_major(crtc, &crtc->mode, crtc->rotation,
+                                            crtc->x, crtc->y);
+            else
+                drmmode_crtc->need_modeset = TRUE;
+        }
+        return TRUE;
     }
 
     if (property == drmmode_output->ctm_atom) {
@@ -3771,6 +3919,9 @@ drmmode_output_init(ScrnInfoPtr pScrn, drmmode_ptr drmmode, drmModeResPtr mode_r
     drmmode_output->mode_output = koutput;
     drmmode_output->mode_encoders = kencoders;
     drmmode_output->drmmode = drmmode;
+    /* Runtime toggles follow xorg.conf until their RandR property is set;
+     * they are consulted by the initial modeset, before the properties exist. */
+    drmmode_output->tearfree = DRMMODE_TOGGLE_AUTO;
     output->mm_width = koutput->mmWidth;
     output->mm_height = koutput->mmHeight;
 
