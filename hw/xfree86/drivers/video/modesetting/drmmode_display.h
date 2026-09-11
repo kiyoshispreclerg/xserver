@@ -133,6 +133,10 @@ typedef struct {
     Bool async_flip_secondaries;
     Bool dri2_enable;
     Bool present_enable;
+    /* TearFree can run on this screen (glamor, and universal planes or no
+     * page flipping): damage tracking is kept so it can be toggled per output
+     * at runtime. tearfree_enable is the xorg.conf default for that toggle. */
+    Bool tearfree_possible;
     Bool tearfree_enable;
     Bool per_crtc_flip;
     /* The kernel rejected a per-CRTC flip outright (EINVAL): stop offering
@@ -301,9 +305,12 @@ typedef struct {
     xf86CrtcPtr current_crtc;
     Atom ctm_atom;
     struct drm_color_ctm ctm;
-    /* RandR "PerCRTCFlip" property: DRMMODE_TOGGLE_* (auto = xorg.conf) */
+    /* RandR "PerCRTCFlip" / "TearFree" properties: DRMMODE_TOGGLE_*
+     * (auto = xorg.conf) */
     Atom per_crtc_flip_atom;
     int per_crtc_flip;
+    Atom tearfree_atom;
+    int tearfree;
 } drmmode_output_private_rec, *drmmode_output_private_ptr;
 
 /* Values of the per-output runtime toggles ("off", "on", "auto"). */
@@ -386,6 +393,7 @@ int drmmode_crtc_flip(xf86CrtcPtr crtc, uint32_t fb_id, int x, int y,
 
 Bool drmmode_crtc_get_fb_id(xf86CrtcPtr crtc, uint32_t *fb_id, int *x, int *y);
 Bool drmmode_crtc_per_crtc_flip_wanted(xf86CrtcPtr crtc);
+Bool drmmode_crtc_tearfree_wanted(xf86CrtcPtr crtc);
 
 void drmmode_set_dpms(ScrnInfoPtr scrn, int PowerManagementMode, int flags);
 void drmmode_crtc_set_vrr(xf86CrtcPtr crtc, Bool enabled);

@@ -1504,8 +1504,12 @@ drmmode_create_tearfree_shadow(xf86CrtcPtr crtc)
     uint32_t w = crtc->mode.HDisplay, h = crtc->mode.VDisplay;
     int i;
 
-    if (!drmmode->tearfree_enable)
+    /* Not wanted on this CRTC (any more): make sure no buffers linger, since
+     * their mere existence is what marks TearFree active on it. */
+    if (!drmmode_crtc_tearfree_wanted(crtc)) {
+        drmmode_destroy_tearfree_shadow(crtc);
         return TRUE;
+    }
 
     /*
      * A modeset that doesn't change the scanout dimensions — a position change,
@@ -3470,6 +3474,22 @@ drmmode_crtc_per_crtc_flip_wanted(xf86CrtcPtr crtc)
                                       drmmode_crtc->drmmode->per_crtc_flip);
 }
 
+/* Should 'crtc' scan out through TearFree shadow buffers? Decides whether
+ * drmmode_create_tearfree_shadow() builds them; whether TearFree is *active*
+ * on a CRTC is then simply whether those buffers exist. */
+Bool
+drmmode_crtc_tearfree_wanted(xf86CrtcPtr crtc)
+{
+    drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
+    drmmode_ptr drmmode = drmmode_crtc->drmmode;
+
+    return drmmode->tearfree_possible &&
+           drmmode_crtc_toggle_wanted(crtc,
+                                      offsetof(drmmode_output_private_rec,
+                                               tearfree),
+                                      drmmode->tearfree_enable);
+}
+
 static void
 drmmode_output_create_resources(xf86OutputPtr output)
 {
@@ -3547,6 +3567,10 @@ drmmode_output_create_resources(xf86OutputPtr output)
 
     drmmode_output->per_crtc_flip_atom =
         drmmode_output_create_toggle_property(output, "PerCRTCFlip");
+
+    if (drmmode->tearfree_possible)
+        drmmode_output->tearfree_atom =
+            drmmode_output_create_toggle_property(output, "TearFree");
 
     for (i = 0; i < drmmode_output->num_props; i++) {
         drmmode_prop_ptr p = &drmmode_output->props[i];
@@ -3693,6 +3717,37 @@ drmmode_output_set_property(xf86OutputPtr output, Atom property,
 
             if (drmmode_crtc->present_flip_fb_id)
                 drmmode_flush_present_flips(scrn);
+        }
+        return TRUE;
+    }
+
+    if (property != None && property == drmmode_output->tearfree_atom) {
+        ScrnInfoPtr scrn = output->scrn;
+        xf86CrtcPtr crtc = output->crtc;
+        int toggle = drmmode_toggle_from_property(value);
+
+        if (toggle < 0)
+            return FALSE;
+        if (toggle == drmmode_output->tearfree)
+            return TRUE;
+
+        drmmode_output->tearfree = toggle;
+        xf86DrvMsg(scrn->scrnIndex, X_INFO, "TearFree %s on output %s\n",
+                   drmmode_toggle_names[toggle], output->name);
+
+        /* Apply it to the CRTC now: re-setting the current mode rebuilds (or
+         * drops) the shadow buffers through drmmode_create_tearfree_shadow()
+         * and points the scanout at the right framebuffer, draining any
+         * Present flip first -- the same path ms_present_unflip() uses. A
+         * CRTC that is DPMS-off picks it up when it is turned back on. */
+        if (crtc && crtc->enabled && scrn->vtSema) {
+            drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
+
+            if (drmmode_crtc->dpms_mode == DPMSModeOn)
+                crtc->funcs->set_mode_major(crtc, &crtc->mode, crtc->rotation,
+                                            crtc->x, crtc->y);
+            else
+                drmmode_crtc->need_modeset = TRUE;
         }
         return TRUE;
     }
@@ -3968,6 +4023,7 @@ drmmode_output_init(ScrnInfoPtr pScrn, drmmode_ptr drmmode, drmModeResPtr mode_r
     /* Runtime toggles follow xorg.conf until their RandR property is set;
      * they are consulted by the initial modeset, before the properties exist. */
     drmmode_output->per_crtc_flip = DRMMODE_TOGGLE_AUTO;
+    drmmode_output->tearfree = DRMMODE_TOGGLE_AUTO;
     output->mm_width = koutput->mmWidth;
     output->mm_height = koutput->mmHeight;
 
