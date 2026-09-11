@@ -197,6 +197,8 @@ do_queue_flip_on_crtc(ScreenPtr screen, xf86CrtcPtr crtc, uint32_t flags,
     drmmode_tearfree_ptr trf = &drmmode_crtc->tearfree;
 
     while (drmmode_crtc_flip(crtc, fb_id, x, y, flags, (void *)(long)seq)) {
+        int err = errno;
+
         /* We may have failed because the event queue was full.  Flush it
          * and retry.  If there was nothing to flush, then we failed for
          * some other reason and should just return an error.
@@ -207,6 +209,9 @@ do_queue_flip_on_crtc(ScreenPtr screen, xf86CrtcPtr crtc, uint32_t flags,
              */
             if (!trf->flip_seq || ms_flush_drm_events_timeout(screen, -1) < 0) {
                 ms_drm_abort_seq(crtc->scrn, seq);
+                /* Report the flip ioctl's error, not whatever the flush and
+                 * abort above left behind. */
+                errno = err;
                 return TRUE;
             }
         }
@@ -670,9 +675,28 @@ ms_do_pageflip_crtc(ScreenPtr screen,
         xf86DrvMsg(scrn->scrnIndex, X_WARNING,
                    "%s: entry alloc for per-CRTC flip failed.\n", log_prefix);
         goto error_undo;
-    case QUEUE_FLIP_DRM_FLUSH_FAILED:
-        ms_print_pageflip_error(scrn->scrnIndex, log_prefix, 0, flags, errno);
+    case QUEUE_FLIP_DRM_FLUSH_FAILED: {
+        int err = errno;
+
+        ms_print_pageflip_error(scrn->scrnIndex, log_prefix, 0, flags, err);
+
+        /* EINVAL means the kernel will never take this kind of flip (in
+         * practice: a tiled scanout buffer on the legacy page-flip ioctl,
+         * which needs the atomic commit path). Present retries the flip on
+         * every presentation, so without this every frame would cost a failed
+         * ioctl and a log line before falling back to the copy anyway. Stop
+         * offering per-CRTC flips for this screen instead. */
+        if (err == EINVAL && !ms->drmmode.per_crtc_flip_failed) {
+            ms->drmmode.per_crtc_flip_failed = TRUE;
+            xf86DrvMsg(scrn->scrnIndex, X_WARNING,
+                       "%s: the kernel rejected a per-CRTC page flip (%s); "
+                       "disabling per-CRTC flips, Present will copy instead. "
+                       "This usually means the scanout buffer is tiled, which "
+                       "needs Option \"Atomic\" \"True\" in xorg.conf.\n",
+                       log_prefix, strerror(err));
+        }
         goto error_undo;
+    }
     case QUEUE_FLIP_SUCCESS:
         break;
     }
