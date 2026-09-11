@@ -364,6 +364,11 @@ ms_present_check_flip(RRCrtcPtr crtc,
     if (ms->drmmode.pending_modeset)
         goto no_flip;
 
+    /* The kernel already refused a per-CRTC flip on this screen (see
+     * ms_do_pageflip_crtc); don't try again on every presentation. */
+    if (per_crtc && ms->drmmode.per_crtc_flip_failed)
+        goto no_flip;
+
     /**
      * Does the window match the pixmap exactly?
      *
