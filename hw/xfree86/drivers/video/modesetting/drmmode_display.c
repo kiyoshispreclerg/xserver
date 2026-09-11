@@ -251,6 +251,7 @@ get_drawable_modifiers(DrawablePtr draw, uint32_t format,
 {
     ScrnInfoPtr scrn = xf86ScreenToScrn(draw->pScreen);
     modesettingPtr ms = modesettingPTR(scrn);
+    PixmapPtr screen_pixmap;
     bool async_flip;
 
     if (!present_can_window_flip((WindowPtr) draw) ||
@@ -258,6 +259,23 @@ get_drawable_modifiers(DrawablePtr draw, uint32_t format,
         *num_modifiers = 0;
         *modifiers = NULL;
         return TRUE;
+    }
+
+    /* Present says the window could flip. If it is not screen-sized that can
+     * only be a per-CRTC flip of the CRTC it covers, which is subject to the
+     * runtime toggle: don't hand out scanout modifiers a flip we would veto
+     * anyway can't use. */
+    screen_pixmap = draw->pScreen->GetScreenPixmap(draw->pScreen);
+    if (draw->width != screen_pixmap->drawable.width ||
+        draw->height != screen_pixmap->drawable.height) {
+        RRCrtcPtr crtc = ms_randr_crtc_covering_drawable(draw);
+
+        if (!crtc || !drmmode_crtc_per_crtc_flip_wanted(crtc->devPrivate) ||
+            ms->drmmode.per_crtc_flip_failed) {
+            *num_modifiers = 0;
+            *modifiers = NULL;
+            return TRUE;
+        }
     }
 
     async_flip = ms_window_has_async_flip((WindowPtr)draw);
@@ -3348,6 +3366,110 @@ drmmode_property_ignore(drmModePropertyPtr prop)
     return FALSE;
 }
 
+/*
+ * Runtime toggles exposed as RandR output properties, set with e.g.
+ *   xrandr --output DP-1 --set PerCRTCFlip on
+ * Each takes the enum "off", "on" or "auto", where "auto" (the initial value)
+ * follows the corresponding xorg.conf Option. A CRTC's effective setting is
+ * derived from the outputs driving it, see drmmode_crtc_toggle_wanted().
+ */
+static const char *const drmmode_toggle_names[] = { "off", "on", "auto" };
+
+/* Create an "off"/"on"/"auto" property on 'output', initialised to "auto".
+ * Returns the property atom, or None if it could not be created. */
+static Atom
+drmmode_output_create_toggle_property(xf86OutputPtr output, const char *name)
+{
+    Atom prop = dixAddAtom(name);
+    Atom values[ARRAY_SIZE(drmmode_toggle_names)];
+    int i, err;
+
+    if (prop == BAD_RESOURCE)
+        return None;
+
+    for (i = 0; i < ARRAY_SIZE(drmmode_toggle_names); i++)
+        values[i] = dixAddAtom(drmmode_toggle_names[i]);
+
+    err = RRConfigureOutputProperty(output->randr_output, prop,
+                                    FALSE, FALSE, FALSE,
+                                    ARRAY_SIZE(values), (INT32 *) values);
+    if (err != 0) {
+        xf86DrvMsg(output->scrn->scrnIndex, X_ERROR,
+                   "RRConfigureOutputProperty error, %d\n", err);
+        return None;
+    }
+    err = RRChangeOutputProperty(output->randr_output, prop, XA_ATOM, 32,
+                                 PropModeReplace, 1,
+                                 &values[DRMMODE_TOGGLE_AUTO], FALSE, FALSE);
+    if (err != 0) {
+        xf86DrvMsg(output->scrn->scrnIndex, X_ERROR,
+                   "RRChangeOutputProperty error, %d\n", err);
+        return None;
+    }
+    return prop;
+}
+
+/* Decode a toggle property value into DRMMODE_TOGGLE_*, or -1 if invalid. */
+static int
+drmmode_toggle_from_property(RRPropertyValuePtr value)
+{
+    Atom atom;
+    const char *name;
+    int i;
+
+    if (value->type != XA_ATOM || value->format != 32 || value->size != 1)
+        return -1;
+    memcpy(&atom, value->data, sizeof(atom));
+    if (!(name = NameForAtom(atom)))
+        return -1;
+
+    for (i = 0; i < ARRAY_SIZE(drmmode_toggle_names); i++)
+        if (!strcmp(drmmode_toggle_names[i], name))
+            return i;
+    return -1;
+}
+
+/*
+ * Effective value of a toggle for 'crtc': "on" if any output driving it says
+ * on, else the xorg.conf default 'option_default' if any says auto, else off.
+ * 'offset' is the offsetof() of the toggle within drmmode_output_private_rec.
+ */
+static Bool
+drmmode_crtc_toggle_wanted(xf86CrtcPtr crtc, size_t offset, Bool option_default)
+{
+    xf86CrtcConfigPtr config = XF86_CRTC_CONFIG_PTR(crtc->scrn);
+    Bool wanted = FALSE;
+    int i;
+
+    for (i = 0; i < config->num_output; i++) {
+        xf86OutputPtr output = config->output[i];
+        drmmode_output_private_ptr drmmode_output = output->driver_private;
+        int toggle;
+
+        if (output->crtc != crtc || !drmmode_output)
+            continue;
+
+        toggle = *(int *) ((char *) drmmode_output + offset);
+        if (toggle == DRMMODE_TOGGLE_ON)
+            return TRUE;
+        if (toggle == DRMMODE_TOGGLE_AUTO && option_default)
+            wanted = TRUE;
+    }
+    return wanted;
+}
+
+/* May Present page-flip a CRTC-sized buffer to 'crtc' on its own? */
+Bool
+drmmode_crtc_per_crtc_flip_wanted(xf86CrtcPtr crtc)
+{
+    drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
+
+    return drmmode_crtc_toggle_wanted(crtc,
+                                      offsetof(drmmode_output_private_rec,
+                                               per_crtc_flip),
+                                      drmmode_crtc->drmmode->per_crtc_flip);
+}
+
 static void
 drmmode_output_create_resources(xf86OutputPtr output)
 {
@@ -3422,6 +3544,9 @@ drmmode_output_create_resources(xf86OutputPtr output)
             drmmode_output->ctm = ctm_identity;
         }
     }
+
+    drmmode_output->per_crtc_flip_atom =
+        drmmode_output_create_toggle_property(output, "PerCRTCFlip");
 
     for (i = 0; i < drmmode_output->num_props; i++) {
         drmmode_prop_ptr p = &drmmode_output->props[i];
@@ -3540,6 +3665,36 @@ drmmode_output_set_property(xf86OutputPtr output, Atom property,
                 }
             }
         }
+    }
+
+    if (property != None && property == drmmode_output->per_crtc_flip_atom) {
+        ScrnInfoPtr scrn = output->scrn;
+        int toggle = drmmode_toggle_from_property(value);
+
+        if (toggle < 0)
+            return FALSE;
+        if (toggle == drmmode_output->per_crtc_flip)
+            return TRUE;
+
+        drmmode_output->per_crtc_flip = toggle;
+        xf86DrvMsg(scrn->scrnIndex, X_INFO, "PerCRTCFlip %s on output %s\n",
+                   drmmode_toggle_names[toggle], output->name);
+
+        /* Turning it back on is the user asking for another go, e.g. after
+         * a previous session-wide veto (see ms_do_pageflip_crtc). */
+        if (toggle == DRMMODE_TOGGLE_ON)
+            drmmode->per_crtc_flip_failed = FALSE;
+
+        /* If this output's CRTC is currently flipped by Present and the new
+         * setting no longer allows it, end that flip now rather than waiting
+         * for the client's next presentation; Present copies from then on. */
+        if (output->crtc && !drmmode_crtc_per_crtc_flip_wanted(output->crtc)) {
+            drmmode_crtc_private_ptr drmmode_crtc = output->crtc->driver_private;
+
+            if (drmmode_crtc->present_flip_fb_id)
+                drmmode_flush_present_flips(scrn);
+        }
+        return TRUE;
     }
 
     if (property == drmmode_output->ctm_atom) {
@@ -3810,6 +3965,9 @@ drmmode_output_init(ScrnInfoPtr pScrn, drmmode_ptr drmmode, drmModeResPtr mode_r
     drmmode_output->mode_output = koutput;
     drmmode_output->mode_encoders = kencoders;
     drmmode_output->drmmode = drmmode;
+    /* Runtime toggles follow xorg.conf until their RandR property is set;
+     * they are consulted by the initial modeset, before the properties exist. */
+    drmmode_output->per_crtc_flip = DRMMODE_TOGGLE_AUTO;
     output->mm_width = koutput->mmWidth;
     output->mm_height = koutput->mmHeight;
 
