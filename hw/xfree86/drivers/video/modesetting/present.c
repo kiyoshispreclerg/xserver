@@ -362,6 +362,15 @@ ms_present_check_flip(RRCrtcPtr crtc,
     if (ms->drmmode.pending_modeset)
         goto no_flip;
 
+    /* The kernel already refused a per-CRTC flip on this screen (see
+     * ms_do_pageflip_crtc); don't try again on every presentation.
+     *
+     * Return directly instead of going through no_flip: this skips
+     * ms_present_check_unflip(), so the pixmap is unverified and must not be
+     * reported as a TearFree flip (see the geometry check below). */
+    if (per_crtc && ms->drmmode.per_crtc_flip_failed)
+        return FALSE;
+
     /**
      * Does the window match the pixmap exactly?
      *
