@@ -135,6 +135,9 @@ typedef struct {
     Bool present_enable;
     Bool tearfree_enable;
     Bool per_crtc_flip;
+    /* The kernel rejected a per-CRTC flip outright (EINVAL): stop offering
+     * them rather than fail one on every presentation. */
+    Bool per_crtc_flip_failed;
 
     uint32_t vrr_prop_id;
     Bool use_ctm;
