@@ -301,7 +301,17 @@ typedef struct {
     xf86CrtcPtr current_crtc;
     Atom ctm_atom;
     struct drm_color_ctm ctm;
+    /* RandR "PerCRTCFlip" property: DRMMODE_TOGGLE_* (auto = xorg.conf) */
+    Atom per_crtc_flip_atom;
+    int per_crtc_flip;
 } drmmode_output_private_rec, *drmmode_output_private_ptr;
+
+/* Values of the per-output runtime toggles ("off", "on", "auto"). */
+enum drmmode_toggle {
+    DRMMODE_TOGGLE_OFF = 0,
+    DRMMODE_TOGGLE_ON = 1,
+    DRMMODE_TOGGLE_AUTO = 2,
+};
 
 typedef struct {
     uint32_t    lessee_id;
@@ -375,6 +385,7 @@ int drmmode_crtc_flip(xf86CrtcPtr crtc, uint32_t fb_id, int x, int y,
                       uint32_t flags, void *data);
 
 Bool drmmode_crtc_get_fb_id(xf86CrtcPtr crtc, uint32_t *fb_id, int *x, int *y);
+Bool drmmode_crtc_per_crtc_flip_wanted(xf86CrtcPtr crtc);
 
 void drmmode_set_dpms(ScrnInfoPtr scrn, int PowerManagementMode, int flags);
 void drmmode_crtc_set_vrr(xf86CrtcPtr crtc, Bool enabled);

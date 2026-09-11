@@ -1478,7 +1478,9 @@ PreInit(ScrnInfoPtr pScrn, int flags)
 
     /* Per-CRTC page flips (XiS): let a compositor page-flip one output at a time
      * instead of only a whole-screen buffer to every CRTC. Off by default until
-     * it is proven stable; the whole-screen flip path is unchanged when off. It
+     * it is proven stable; the whole-screen flip path is unchanged when off.
+     * This is the default for the per-output "PerCRTCFlip" RandR property
+     * (value "auto"), which can override it per output at runtime. It
      * additionally requires an atomic-capable driver (gated in
      * ms_present_screen_init) -- and in practice Option "Atomic" "True", since a
      * per-CRTC flip of a tiled buffer only lands on the atomic commit path. */

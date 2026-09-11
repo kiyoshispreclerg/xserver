@@ -363,9 +363,11 @@ ms_present_check_flip(RRCrtcPtr crtc,
     if (ms->drmmode.pending_modeset)
         goto no_flip;
 
-    /* The kernel already refused a per-CRTC flip on this screen (see
-     * ms_do_pageflip_crtc); don't try again on every presentation. */
-    if (per_crtc && ms->drmmode.per_crtc_flip_failed)
+    /* Per-CRTC flips are opt-in per CRTC (Option "PerCRTCFlip" and the
+     * per-output "PerCRTCFlip" RandR property), and stay off for the session
+     * once the kernel refused one (see ms_do_pageflip_crtc). */
+    if (per_crtc && (ms->drmmode.per_crtc_flip_failed ||
+                     !drmmode_crtc_per_crtc_flip_wanted(crtc->devPrivate)))
         goto no_flip;
 
     /**
@@ -647,12 +649,21 @@ ms_present_screen_init(ScreenPtr screen)
 
     /* Per-CRTC page flips switch a CRTC to a framebuffer of its own size (a
      * different stride than the shared screen framebuffer), which is only
-     * reliable under atomic KMS. Off by default (Option "PerCRTCFlip"); when
-     * disabled the whole-screen flip path is used, exactly as before. */
-    if (ms->atomic_modeset_capable && ms->drmmode.per_crtc_flip) {
+     * reliable under atomic KMS. The capability itself is static; whether a
+     * given CRTC actually takes them is decided at flip time from Option
+     * "PerCRTCFlip" (off by default) and the per-output "PerCRTCFlip" RandR
+     * property, in ms_present_check_flip() and get_drawable_modifiers(). When
+     * no CRTC wants them the whole-screen flip path is used, exactly as
+     * before. */
+#ifdef GLAMOR
+    if (ms->atomic_modeset_capable) {
         info.capable_flip_crtc = TRUE;
-        xf86DrvMsg(screen->myNum, X_INFO, "Per-CRTC page flip enabled\n");
-    } else if (ms->drmmode.per_crtc_flip) {
+        xf86DrvMsg(screen->myNum, X_INFO, "Per-CRTC page flip %s by default "
+                   "(Option \"PerCRTCFlip\"; per-output property PerCRTCFlip)\n",
+                   ms->drmmode.per_crtc_flip ? "enabled" : "disabled");
+    } else
+#endif
+    if (ms->drmmode.per_crtc_flip) {
         xf86DrvMsg(screen->myNum, X_WARNING,
                    "Per-CRTC page flip requested but needs an atomic-capable "
                    "driver; using whole-screen flips\n");
