@@ -11,5 +11,5 @@ Section "OutputClass"
         MatchDriver "nvidia-drm"
         Module "glx"
         Module "glxserver_nvidia"
-        ModulePath "@libdir@/nvidia/xorg"
+        ModulePath "@libdir@/nvidia/xorg,/usr/lib/x86_64-linux-gnu/nvidia/xorg,/usr/lib/nvidia/nvidia"
 EndSection
