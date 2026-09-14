@@ -102,4 +102,5 @@ int  XnotifyQueryAction(const int action, char out_exes[][EXE_PATH_MAX], int max
 void XnotifyPoll(void);
 void Xnotify(ClientPtr client, const int action);
 void XnotifyLoadConfig(void);
+void XnotifyReloadConfig(void);
 char * GetClientExePath(ClientPtr client);
