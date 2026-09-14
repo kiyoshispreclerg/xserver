@@ -57,6 +57,34 @@ and finally allows Python to run only the specified script.
 
 If there is no files or no valid rules in the files, the X server will allow everything, as always has been the default.
 
+### Runtime Commands (Guard → Server)
+
+The guard talks to the server over the `xperms.sock` command socket with small
+JSON datagrams (see `xnotify.c` for the exact fields per command: `ALLOW`,
+`DENY`, `ALLOW_ALL`, `DENY_ALL`, `ALLOW_ACTION`, `DENY_ACTION`,
+`QUERY_ACTION`, `ENABLE`, `DISABLE`, `STATUS`, `XNOTIFY` heartbeat). One more
+command is available to reload the static configuration on demand:
+
+`{"command":"RELOAD"}`
+
+This tells the server to re-read `xnotify.conf` / `xnotify.conf.d/*.conf` from
+disk right now, exactly as it does on startup — as if the extension were
+internally restarting. It only wipes and rebuilds the **internal rule table**
+(everything a rule-file `ALLOW`/`DENY` would have added, including anything
+the guard itself had set dynamically) and calls the same `XnotifyLoadConfig()`
+used at startup and when the guard disconnects.
+
+It does **not**:
+- drop the guard connection or touch heartbeat/liveness state,
+- clear already-connected clients' cached permission masks (a client that
+  already had an action granted keeps working; only a fresh permission check
+  — one that misses the per-client cache — sees the reloaded rules),
+- touch the pid/exe resolution cache or the pending-notification throttle.
+
+Use it after editing the config files on disk so the new static rules take
+effect without disturbing clients that are already running. The server
+replies with a normal `STATUS` message once the reload completes.
+
 ### Difference from Xnamespace
 
 **Xnotify** is a **simple** notification and permission system.  
