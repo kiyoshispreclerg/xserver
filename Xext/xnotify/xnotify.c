@@ -404,6 +404,25 @@ XnotifyLoadConfig(void) {
     }
 }
 
+/**
+ * @brief reload the static configuration at runtime, without touching clients
+ *
+ * A lighter-weight alternative to what happens when the guard dies: it does
+ * NOT invalidate per-client cached permission masks, does NOT drop the guard
+ * connection, and does NOT clear the pid/exe or pending-notification caches -
+ * it only wipes the rule table (both the hash table and the ordered list) and
+ * calls XnotifyLoadConfig() again, exactly as if the extension were
+ * restarting internally. Already-running clients keep whatever bits their
+ * cache already holds; only lookups that miss the per-client cache will see
+ * the freshly reloaded rules. Meant to be triggered on demand by the external
+ * guard (RELOAD command) after the on-disk config has changed.
+ */
+void
+XnotifyReloadConfig(void) {
+    ErrorF("Xnotify: reloading static configuration on request\n");
+    XnotifyLoadConfig();
+}
+
 static int
 XnotifyLoadConfigDir(const char *dir_path) {
     DIR *dir = opendir(dir_path);
@@ -1541,6 +1560,13 @@ XnotifyPoll(void) {
             continue;
         }
         if (strstr(buf, "\"command\":\"STATUS\"")) {
+            XnotifySendStatus();
+            continue;
+        }
+        if (strstr(buf, "\"command\":\"RELOAD\"")) {
+            /* Deliberately not routed through permissions_changed: a reload
+             * must not invalidate already-connected clients' cached masks. */
+            XnotifyReloadConfig();
             XnotifySendStatus();
             continue;
         }
