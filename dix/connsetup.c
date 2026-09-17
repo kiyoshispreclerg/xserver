@@ -139,7 +139,7 @@ void x_rpcbuf_write_xPixmapFormat(x_rpcbuf_t *rpcbuf, PixmapFormatPtr pPixmapFor
 
 x_rpcbuf_t dixBuildConnectionBlock(int maxscreens)
 {
-    const char VendorString[] = "XLibre";
+    const char VendorString[] = "XiS";
 
     if (!maxscreens) {
         maxscreens = screenInfo.numScreens;
