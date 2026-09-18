@@ -1288,6 +1288,29 @@ XnotifySendStatus(void) {
     send(notify_sock, msg, strlen(msg), 0);
 }
 
+/**
+ * @brief reply to the guard's GET_CONFIG_PATH with the real rule file paths
+ *
+ * SYSCONFDIR is a compile-time constant of the server (its --prefix/--sysconfdir
+ * at build time), not something an external guard can know or guess. A guard
+ * that wants to write a permanent rule of its own directly into the static
+ * config (e.g. because it runs with no perms.conf of its own) asks for this
+ * first so it writes to the directory the server will actually reload from.
+ */
+static void
+XnotifySendConfigPath(void) {
+    if (notify_sock == -1)
+        XnotifyInit();
+    if (notify_sock == -1)
+        return;
+
+    char msg[600];
+    snprintf(msg, sizeof(msg),
+             "{\"command\":\"CONFIG_PATH\",\"dir\":\"%s/xnotify.conf.d\",\"file\":\"%s/xnotify.conf\"}\n",
+             SYSCONFDIR, SYSCONFDIR);
+    send(notify_sock, msg, strlen(msg), 0);
+}
+
 static struct {
     char exe[EXE_PATH_MAX];
     int      action;
@@ -1568,6 +1591,10 @@ XnotifyPoll(void) {
              * must not invalidate already-connected clients' cached masks. */
             XnotifyReloadConfig();
             XnotifySendStatus();
+            continue;
+        }
+        if (strstr(buf, "\"command\":\"GET_CONFIG_PATH\"")) {
+            XnotifySendConfigPath();
             continue;
         }
 

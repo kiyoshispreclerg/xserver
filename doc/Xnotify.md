@@ -85,6 +85,21 @@ Use it after editing the config files on disk so the new static rules take
 effect without disturbing clients that are already running. The server
 replies with a normal `STATUS` message once the reload completes.
 
+A guard that wants to write a rule directly into the static config — for
+example one running with no permanent rule store of its own — can ask the
+server where that actually is instead of guessing, since `SYSCONFDIR` is a
+compile-time constant of the server, not of the guard:
+
+`{"command":"GET_CONFIG_PATH"}`
+
+The server replies over the notify socket with:
+
+`{"command":"CONFIG_PATH","dir":"<SYSCONFDIR>/xnotify.conf.d","file":"<SYSCONFDIR>/xnotify.conf"}`
+
+`dir` is where a new drop-in `*.conf` file should be written (typically
+requiring elevated privileges, e.g. via polkit); follow up with `RELOAD`
+once the file is in place so the new rule takes effect.
+
 ### Difference from Xnamespace
 
 **Xnotify** is a **simple** notification and permission system.  
