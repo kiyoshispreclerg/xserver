@@ -569,6 +569,21 @@ ProcRRChangeOutputProperty(ClientPtr client)
         return BadAtom;
     }
 
+    /*
+     * `xrandr --set DPI 0` is the runtime opt back into automatic
+     * per-output DPI computation: 0 is otherwise never a value
+     * RROutputUpdateComputedDpi() would store (see its `dpi < 1` guard),
+     * so it's free to use as a sentinel. Clear the user override instead
+     * of writing 0 into the property, then recompute immediately.
+     */
+    if (stuff->property == dixAddAtom("DPI") && stuff->type == XA_INTEGER &&
+        format == 32 && mode == PropModeReplace && len == 1 &&
+        *(INT32 *) &stuff[1] == 0) {
+        output->dpiUserSet = FALSE;
+        RROutputUpdateComputedDpi(output);
+        return Success;
+    }
+
     err = RRChangeOutputProperty(output, stuff->property,
                                  stuff->type, (int) format,
                                  (int) mode, len, (void *) &stuff[1], TRUE,
