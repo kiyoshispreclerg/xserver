@@ -31,6 +31,8 @@ This is a soft fork of XLibre named **XiS**, adding a small set of features on t
 * Legacy **DGA** protocol brought back, with its raw framebuffer and input access guarded by **[Xnotify](doc/Xnotify.md)**.
 * **[Per-CRTC presentation](doc/present-per-crtc-flip.md)** in the Present extension: a compositor can page-flip a single output instead of the whole screen, so per-output and multi-monitor compositors avoid full-screen copies.
 * **modesetting** DDX updated as the first driver to support per-CRTC page flips.
+* **`AutoDPI`** `ServerFlags` option to calculate automatically each output's DPI from EDID size and mode.
+* Modesetting DDX's **`TearFree`** and **`PerCRTCFlip`** as runtime togglable RandR properties.
 
 And more. See the commit history for details on every change.
 
