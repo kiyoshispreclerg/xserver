@@ -375,7 +375,7 @@ RROutputUpdateComputedDpi(RROutputPtr output)
         return;
 
     (void) RRChangeOutputProperty(output, dpiAtom, XA_INTEGER, 32,
-                                  PropModeReplace, 1, &dpi, FALSE, FALSE);
+                                  PropModeReplace, 1, &dpi, TRUE, FALSE);
 }
 
 Bool
