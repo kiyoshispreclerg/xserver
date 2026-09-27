@@ -1342,6 +1342,15 @@ drmmode_crtc_dpms(xf86CrtcPtr crtc, int mode)
 
     drmmode_crtc->dpms_mode = mode;
 
+    /* Give per-CRTC flips another chance whenever a CRTC comes back on: the
+     * kernel rejection ms_do_pageflip_crtc() latches into per_crtc_flip_failed
+     * (see pageflip.c) could have been specific to a transient state rather
+     * than the tiled-scanout case it targets, and this runs far too rarely
+     * (unlike a Present flip attempt, which happens every frame) for retrying
+     * here to cost anything if the veto was in fact deserved. */
+    if (mode == DPMSModeOn)
+        ms->drmmode.per_crtc_flip_failed = FALSE;
+
     if (ms->atomic_modeset) {
         if (mode != DPMSModeOn && !ms->pending_modeset)
             drmmode_crtc_disable(crtc);
