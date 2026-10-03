@@ -195,6 +195,7 @@ struct present_screen_priv {
     ConfigNotifyProcPtr         ConfigNotify;
     ClipNotifyProcPtr           ClipNotify;
     GetImageProcPtr             GetImage;
+    CreateGCProcPtr             CreateGC;   /* wrapped only on per-CRTC capable screens */
 
     uint32_t                    fake_interval;
 
@@ -479,6 +480,16 @@ Bool
 present_flip_getimage(DrawablePtr pDrawable, int sx, int sy, int w, int h,
                       unsigned int format, unsigned long planeMask,
                       char *pdstLine);
+
+/* CopyArea counterpart of present_flip_getimage, for a copy from the root with
+ * IncludeInferiors: copies the non-flipped remainder from the root and the
+ * per-CRTC flipped regions from the flip buffers. Returns TRUE if it handled
+ * the copy, with the merged GraphicsExpose region in '*exposed'; FALSE means
+ * the caller should do a plain CopyArea. pGC's ops must be unwrapped. */
+Bool
+present_flip_copy_area(DrawablePtr pSrc, DrawablePtr pDst, GCPtr pGC,
+                       int srcx, int srcy, int w, int h, int dstx, int dsty,
+                       RegionPtr *exposed);
 
 void
 present_set_abort_flip(ScreenPtr screen, present_flip_state_ptr fs);
