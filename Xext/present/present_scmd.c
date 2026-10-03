@@ -29,6 +29,7 @@
 #include "Xext/present/present_priv.h"
 
 #include <servermd.h>
+#include <gcstruct.h>
 #include <misync.h>
 #include <misyncstr.h>
 
@@ -241,6 +242,7 @@ present_read_into_result(ScreenPtr screen, DrawablePtr src,
  * 'box' with its (desktop-space) CRTC rectangle. Used both to punch flipped
  * regions out of the screen-pixmap read and to drive the substitution, so the
  * two stay exactly in sync (every punched pixel is refilled, and vice versa).
+ * Shared by the GetImage and CopyArea paths.
  */
 static Bool
 present_flip_overlay_valid(ScreenPtr screen, present_flip_state_ptr fs,
@@ -252,8 +254,14 @@ present_flip_overlay_valid(ScreenPtr screen, present_flip_state_ptr fs,
      * root window's pixmap to the flip buffer, so a plain root GetImage already
      * reads the flipped content -- overlaying it again would be redundant work
      * on every capture of a fullscreen flipping app (e.g. a game while OBS is
-     * recording). */
+     * recording).
+     *
+     * Skip rotated/reflected CRTCs: their flip buffer holds scanout-oriented
+     * pixels, which don't match the root's logical layout, so copying them in
+     * would show the wrong image (same reason present_restore_screen_pixmap
+     * skips seeding them). */
     return fp && fs->crtc && present_flip_is_per_crtc(screen, fp) &&
+           fs->crtc->rotation == RR_Rotate_0 &&
            present_crtc_box(fs->crtc, box) &&
            fp->drawable.depth == depth &&
            fp->drawable.bitsPerPixel == bpp;
@@ -432,6 +440,165 @@ present_flip_getimage(DrawablePtr pDrawable, int sx, int sy, int w, int h,
     /* Fill the flipped regions from the flip buffers. */
     present_flip_overlay_image(pDrawable, sx, sy, w, h, format, planeMask,
                                pdstLine);
+    return TRUE;
+}
+
+static PixmapPtr
+present_drawable_pixmap(DrawablePtr pDrawable)
+{
+    if (pDrawable->type == DRAWABLE_WINDOW)
+        return (*pDrawable->pScreen->GetWindowPixmap)((WindowPtr) pDrawable);
+    return (PixmapPtr) pDrawable;
+}
+
+/* Merge one CopyArea's GraphicsExpose region into the running result. */
+static void
+present_accumulate_exposed(RegionPtr *exposed, RegionPtr r)
+{
+    if (!r)
+        return;
+    if (!*exposed) {
+        *exposed = r;
+        return;
+    }
+    RegionUnion(*exposed, *exposed, r);
+    RegionDestroy(r);
+}
+
+/*
+ * CopyArea counterpart of present_flip_getimage: a copy from the root with
+ * IncludeInferiors (the core-protocol way to grab "the screen" into a pixmap)
+ * would read the stale screen pixmap for regions that are page-flipped per
+ * CRTC. Copy the non-flipped remainder from the root and the flipped regions
+ * straight from the flip buffers, so each destination pixel is written exactly
+ * once (no duplicated blits) and everything stays a GPU copy. Only the
+ * destination is written, so the screen pixmap gets no damage.
+ *
+ * The destination must not share storage with the root (the screen pixmap, or
+ * whatever the root tree currently renders to) nor be a flip buffer: splitting
+ * one copy into several would then read pixels an earlier piece had already
+ * overwritten, and writing the screen pixmap would generate damage.
+ *
+ * Must be called with pGC's ops unwrapped (pGC->ops->CopyArea is the real
+ * one). Returns TRUE if it handled the copy, with the merged GraphicsExpose
+ * region in '*exposed'; FALSE -- unchanged behaviour -- for any other copy, so
+ * the caller does a plain CopyArea.
+ */
+Bool
+present_flip_copy_area(DrawablePtr pSrc, DrawablePtr pDst, GCPtr pGC,
+                       int srcx, int srcy, int w, int h, int dstx, int dsty,
+                       RegionPtr *exposed)
+{
+    ScreenPtr                   screen = pSrc->pScreen;
+    present_screen_priv_ptr     screen_priv = present_screen_priv(screen);
+    present_flip_state_ptr      fs;
+    PixmapPtr                   dst_pixmap;
+    int                         req_x0, req_y0, req_x1, req_y1;
+    RegionRec                   remaining;
+    BoxRec                      req_box;
+    BoxPtr                      rects;
+    Bool                        any = FALSE;
+    int                         nrects, i;
+
+    if (!screen_priv)
+        return FALSE;
+    if (pSrc->type != DRAWABLE_WINDOW || (WindowPtr) pSrc != screen->root ||
+        pGC->subWindowMode != IncludeInferiors)
+        return FALSE;
+    if (w <= 0 || h <= 0)
+        return FALSE;
+
+    dst_pixmap = present_drawable_pixmap(pDst);
+    if (dst_pixmap == (*screen->GetScreenPixmap)(screen) ||
+        dst_pixmap == (*screen->GetWindowPixmap)(screen->root))
+        return FALSE;
+
+    req_x0 = pSrc->x + srcx;
+    req_y0 = pSrc->y + srcy;
+    req_x1 = req_x0 + w;
+    req_y1 = req_y0 + h;
+
+    req_box.x1 = req_x0;
+    req_box.y1 = req_y0;
+    req_box.x2 = req_x1;
+    req_box.y2 = req_y1;
+    RegionInit(&remaining, &req_box, 1);
+
+    /* Punch each flipped CRTC rectangle out of what we'll copy from the root,
+     * using the same predicate as the refill below. */
+    xorg_list_for_each_entry(fs, &screen_priv->flip_states, link) {
+        BoxRec      box;
+        RegionRec   r;
+
+        if (fs->flip_pixmap == dst_pixmap) {
+            RegionUninit(&remaining);
+            return FALSE;
+        }
+
+        if (!present_flip_overlay_valid(screen, fs, pSrc->depth, pSrc->bitsPerPixel, &box))
+            continue;
+
+        if (box.x1 < req_x0) box.x1 = req_x0;
+        if (box.y1 < req_y0) box.y1 = req_y0;
+        if (box.x2 > req_x1) box.x2 = req_x1;
+        if (box.y2 > req_y1) box.y2 = req_y1;
+        if (box.x1 >= box.x2 || box.y1 >= box.y2)
+            continue;
+
+        RegionInit(&r, &box, 1);
+        RegionSubtract(&remaining, &remaining, &r);
+        RegionUninit(&r);
+        any = TRUE;
+    }
+
+    if (!any) {
+        RegionUninit(&remaining);
+        return FALSE;
+    }
+
+    *exposed = NULL;
+
+    /* Copy the non-flipped remainder from the root. Out-of-bounds source parts
+     * stay in the remainder, so their GraphicsExpose regions come from here,
+     * exactly as the single full copy would have produced them. */
+    nrects = RegionNumRects(&remaining);
+    rects = RegionRects(&remaining);
+    for (i = 0; i < nrects; i++) {
+        BoxPtr b = &rects[i];
+
+        present_accumulate_exposed(exposed,
+            (*pGC->ops->CopyArea)(pSrc, pDst, pGC,
+                                  b->x1 - pSrc->x, b->y1 - pSrc->y,
+                                  b->x2 - b->x1, b->y2 - b->y1,
+                                  dstx + (b->x1 - req_x0),
+                                  dsty + (b->y1 - req_y0)));
+    }
+    RegionUninit(&remaining);
+
+    /* Copy the flipped regions from the flip buffers, whose origin is the CRTC
+     * origin. */
+    xorg_list_for_each_entry(fs, &screen_priv->flip_states, link) {
+        BoxRec      box;
+        int         ix0, iy0, ix1, iy1;
+
+        if (!present_flip_overlay_valid(screen, fs, pSrc->depth, pSrc->bitsPerPixel, &box))
+            continue;
+
+        ix0 = max(req_x0, box.x1);
+        iy0 = max(req_y0, box.y1);
+        ix1 = min(req_x1, box.x2);
+        iy1 = min(req_y1, box.y2);
+        if (ix0 >= ix1 || iy0 >= iy1)
+            continue;
+
+        present_accumulate_exposed(exposed,
+            (*pGC->ops->CopyArea)(&fs->flip_pixmap->drawable, pDst, pGC,
+                                  ix0 - box.x1, iy0 - box.y1,
+                                  ix1 - ix0, iy1 - iy0,
+                                  dstx + (ix0 - req_x0),
+                                  dsty + (iy0 - req_y0)));
+    }
+
     return TRUE;
 }
 
