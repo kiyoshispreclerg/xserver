@@ -284,6 +284,36 @@ A debug tracer for the flip-decision gate is available at runtime with
 flip — useful when bringing up a new driver or compositor.
 
 
+### 6.1 Screen-capture capability bit (client visible)
+
+Screen recorders that want a zero-copy GPU capture use a `CopyArea` from the root
+window (with `IncludeInferiors`) into a pixmap they import as a texture, instead of
+`GetImage`/`ShmGetImage` (a synchronous readback to system memory). With per-CRTC
+flips the screen pixmap is stale for the flipped regions, so the server wraps
+`CreateGC` and gives such copies the same flipped-content substitution `GetImage`
+gets (`present_flip_copy_area`).
+
+A client cannot tell from the protocol whether the server it talks to does that, and
+guessing wrong freezes the capture on the flipped CRTCs. So `PresentQueryCapabilities`
+reports one extra bit:
+
+```c
+/* Xext/present/present_priv.h -- reply bit 31, clear of the upstream bits */
+#define PresentCapabilityXiSRootCopy    0x80000000u
+```
+
+Meaning: *a root `CopyArea` with `IncludeInferiors` shows what is actually displayed
+on this CRTC, including per-CRTC flipped content.* It is reported when the CopyArea
+wrap is installed (screens whose driver advertises `capable_flip_crtc`) or when the
+screen cannot flip per CRTC at all (its screen pixmap is always current). It says
+nothing about whether per-CRTC flips are possible. A server without the bit gives no
+guarantee, so clients must keep using `GetImage` there.
+
+The reply is per CRTC: pass a RandR CRTC id (or a window) as the request target. The
+upstream protocol ignores capability bits it does not know, so older clients and
+servers are unaffected.
+
+
 ## 7. Porting to another DDX (amdgpu / nouveau / intel)
 
 The drivers map function-for-function. Using the `modesetting` ↔ `amdgpu` mapping as
