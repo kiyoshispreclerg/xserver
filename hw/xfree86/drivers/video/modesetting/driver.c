@@ -75,10 +75,13 @@
 #include "seatd-libseat.h"
 #endif
 
+#include <X11/extensions/dpmsconst.h>
+
 #include "driver.h"
 
 static void AdjustFrame(ScrnInfoPtr pScrn, int x, int y);
 static Bool CloseScreen(ScreenPtr pScreen);
+static Bool ms_SaveScreen(ScreenPtr pScreen, int mode);
 static Bool EnterVT(ScrnInfoPtr pScrn);
 static void Identify(int flags);
 static const OptionInfoRec *AvailableOptions(int chipid, int busid);
@@ -2147,7 +2150,7 @@ ScreenInit(ScreenPtr pScreen, int argc, char **argv)
         pScreen->CreateWindow = CreateWindow_oneshot;
     }
 
-    pScreen->SaveScreen = xf86SaveScreen;
+    pScreen->SaveScreen = ms_SaveScreen;
     ms->CloseScreen = pScreen->CloseScreen;
     pScreen->CloseScreen = CloseScreen;
 
@@ -2320,6 +2323,28 @@ EnterVT(ScrnInfoPtr pScrn)
         RRSetChanged(xf86ScrnToScreen(pScrn));
         RRTellChanged(xf86ScrnToScreen(pScrn));
     }
+
+    return TRUE;
+}
+
+/*
+ * With atomic modesetting the per-CRTC/per-output dpms hooks only ever turn
+ * things off; turning them back on is done by the single atomic commit in
+ * drmmode_set_dpms(). xf86SaveScreen() goes straight to those hooks, so a
+ * screen blanked by the screen saver would never light up again. Route the
+ * screen saver through drmmode_set_dpms() instead, like the DPMS extension.
+ */
+static Bool
+ms_SaveScreen(ScreenPtr pScreen, int mode)
+{
+    ScrnInfoPtr pScrn = xf86ScreenToScrn(pScreen);
+    modesettingPtr ms = modesettingPTR(pScrn);
+
+    if (!ms->atomic_modeset)
+        return xf86SaveScreen(pScreen, mode);
+
+    if (pScrn->vtSema)
+        drmmode_set_dpms(pScrn, xf86IsUnblank(mode) ? DPMSModeOn : DPMSModeOff, 0);
 
     return TRUE;
 }
