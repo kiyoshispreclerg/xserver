@@ -703,12 +703,14 @@ present_re_execute(present_vblank_ptr vblank)
 }
 
 static void
-present_flip_try_ready(ScreenPtr screen)
+present_flip_try_ready(RRCrtcPtr crtc)
 {
     present_vblank_ptr  vblank;
 
+    /* The queue is shared by every CRTC: only the one whose flip just
+     * finished is free to go, or its frame waits on another CRTC's vblank. */
     xorg_list_for_each_entry(vblank, &present_flip_queue, event_queue) {
-        if (vblank->queued) {
+        if (vblank->queued && vblank->crtc == crtc) {
             present_re_execute(vblank);
             return;
         }
@@ -879,7 +881,7 @@ present_flip_notify(present_vblank_ptr vblank, uint64_t ust, uint64_t crtc_msc)
     present_vblank_notify(vblank, PresentCompleteKindPixmap, PresentCompleteModeFlip, ust, crtc_msc);
     present_vblank_destroy(vblank);
 
-    present_flip_try_ready(screen);
+    present_flip_try_ready(fs->crtc);
 }
 
 void
@@ -916,7 +918,7 @@ present_event_notify(uint64_t event_id, uint64_t ust, uint64_t msc)
                 DebugPresent(("\tun %" PRIu64 "\n", event_id));
                 fs->unflip_event_id = 0;
                 present_flip_idle(fs);
-                present_flip_try_ready(walkScreen);
+                present_flip_try_ready(fs->crtc);
                 return;
             }
         }
