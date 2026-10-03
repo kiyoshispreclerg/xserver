@@ -106,6 +106,19 @@ typedef struct present_screen_priv present_screen_priv_rec, *present_screen_priv
 typedef struct present_window_priv present_window_priv_rec, *present_window_priv_ptr;
 
 /*
+ * XiS extension to PresentQueryCapabilities (reply bit 31, well clear of the
+ * bits the upstream protocol allocates from 0 upwards): a CopyArea from the
+ * root window with IncludeInferiors -- the core-protocol way to grab the
+ * screen into a pixmap, entirely on the GPU -- shows what is actually
+ * displayed on the queried CRTC, including content that is page-flipped per
+ * CRTC. Clients that capture the screen may use a CopyArea-based path only
+ * when this bit is set; without it they must keep using GetImage.
+ *
+ * Says nothing about whether this server can flip per CRTC at all.
+ */
+#define PresentCapabilityXiSRootCopy    0x80000000u
+
+/*
  * Mode hooks
  */
 typedef uint32_t (*present_priv_query_capabilities_ptr)(present_screen_priv_ptr screen_priv);
