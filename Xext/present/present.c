@@ -39,7 +39,20 @@ present_query_capabilities(RRCrtcPtr crtc)
     if (!screen_priv)
         return 0;
 
-    return screen_priv->query_capabilities(screen_priv);
+    uint32_t caps = screen_priv->query_capabilities(screen_priv);
+
+    /* A root CopyArea reads the screen pixmap, which is stale for regions that
+     * are page-flipped per CRTC. It is coherent when the CopyArea wrap that
+     * substitutes the flipped content is installed (done exactly on screens
+     * whose driver can flip per CRTC), or when the screen cannot flip per CRTC
+     * at all and the screen pixmap is always current. */
+    const present_screen_info_rec *info = screen_priv->info;
+    Bool can_flip_crtc = info && info->version >= 2 && info->capable_flip_crtc;
+
+    if (!can_flip_crtc || screen_priv->CreateGC)
+        caps |= PresentCapabilityXiSRootCopy;
+
+    return caps;
 }
 
 RRCrtcPtr
