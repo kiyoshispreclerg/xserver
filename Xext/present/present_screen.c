@@ -26,6 +26,8 @@
 #include "miext/extinit_priv.h"
 #include "Xext/present/present_priv.h"
 
+#include "gcstruct.h"
+
 #define PRESENT_WRAP_HOOK(priv,real,mem,func) {\
     (priv)->mem = (real)->mem; \
     (real)->mem = (func); \
@@ -74,6 +76,8 @@ static void present_close_screen(CallbackListPtr *pcbl, ScreenPtr screen, void *
         screen_priv->flip_destroy(screen);
 
     PRESENT_UNWRAP_HOOK(screen_priv, screen, GetImage);
+    if (screen_priv->CreateGC)
+        PRESENT_UNWRAP_HOOK(screen_priv, screen, CreateGC);
 
     dixScreenUnhookClose(screen, present_close_screen);
     dixSetPrivate(&screen->devPrivates, &present_screen_private_key, NULL);
@@ -194,6 +198,183 @@ present_get_image(DrawablePtr pDrawable, int sx, int sy, int w, int h,
     PRESENT_WRAP_HOOK(screen_priv, screen, GetImage, present_get_image);
 }
 
+/*
+ * GC wrap so a CopyArea from the root with IncludeInferiors (the core-protocol
+ * way to grab "the screen" into a pixmap) sees content that is page-flipped
+ * per CRTC, like present_get_image does for GetImage. Only installed on screens
+ * whose driver can flip per CRTC.
+ *
+ * To keep the per-operation cost off ordinary rendering, Present's ops are
+ * installed only on GCs whose subwindow-mode is IncludeInferiors (the only
+ * ones that can read through to the root's contents); every other GC keeps
+ * its own ops untouched and only pays the GCFuncs indirection on state
+ * changes. The wrapped ops are the lower ops with just CopyArea replaced.
+ */
+typedef struct {
+    const GCFuncs   *funcs;
+    const GCOps     *ops;           /* lower ops while ours are installed, else NULL */
+    GCOps           wrapped_ops;    /* lower ops with CopyArea replaced */
+} present_gc_priv_rec, *present_gc_priv_ptr;
+
+static DevPrivateKeyRec present_gc_private_key;
+
+static inline present_gc_priv_ptr
+present_gc_priv(GCPtr gc)
+{
+    return dixLookupPrivate(&gc->devPrivates, &present_gc_private_key);
+}
+
+static void present_validate_gc(GCPtr gc, unsigned long changes, DrawablePtr pDrawable);
+static void present_change_gc(GCPtr gc, unsigned long mask);
+static void present_copy_gc(GCPtr src, unsigned long mask, GCPtr dst);
+static void present_destroy_gc(GCPtr gc);
+static void present_change_clip(GCPtr gc, int type, void *pvalue, int nrects);
+static void present_destroy_clip(GCPtr gc);
+static void present_copy_clip(GCPtr dst, GCPtr src);
+
+static const GCFuncs present_gc_funcs = {
+    present_validate_gc, present_change_gc, present_copy_gc, present_destroy_gc,
+    present_change_clip, present_destroy_clip, present_copy_clip
+};
+
+static RegionPtr present_gc_copy_area(DrawablePtr pSrc, DrawablePtr pDst, GCPtr gc,
+                                      int srcx, int srcy, int w, int h,
+                                      int dstx, int dsty);
+
+/* Restore the lower layer's funcs (and ops, if ours are installed). */
+static void
+present_gc_unwrap(present_gc_priv_ptr priv, GCPtr gc)
+{
+    gc->funcs = priv->funcs;
+    if (priv->ops)
+        gc->ops = priv->ops;
+}
+
+/* Re-install our funcs, and our ops only if the GC is IncludeInferiors. The
+ * lower layer may have switched its ops table, so refresh the copy. */
+static void
+present_gc_wrap(present_gc_priv_ptr priv, GCPtr gc)
+{
+    priv->funcs = gc->funcs;
+    gc->funcs = &present_gc_funcs;
+
+    if (gc->subWindowMode == IncludeInferiors) {
+        priv->ops = gc->ops;
+        priv->wrapped_ops = *gc->ops;
+        priv->wrapped_ops.CopyArea = present_gc_copy_area;
+        gc->ops = &priv->wrapped_ops;
+    } else
+        priv->ops = NULL;
+}
+
+static void
+present_validate_gc(GCPtr gc, unsigned long changes, DrawablePtr pDrawable)
+{
+    present_gc_priv_ptr priv = present_gc_priv(gc);
+
+    present_gc_unwrap(priv, gc);
+    (*gc->funcs->ValidateGC) (gc, changes, pDrawable);
+    present_gc_wrap(priv, gc);
+}
+
+static void
+present_change_gc(GCPtr gc, unsigned long mask)
+{
+    present_gc_priv_ptr priv = present_gc_priv(gc);
+
+    present_gc_unwrap(priv, gc);
+    (*gc->funcs->ChangeGC) (gc, mask);
+    present_gc_wrap(priv, gc);
+}
+
+static void
+present_copy_gc(GCPtr src, unsigned long mask, GCPtr dst)
+{
+    present_gc_priv_ptr priv = present_gc_priv(dst);
+
+    present_gc_unwrap(priv, dst);
+    (*dst->funcs->CopyGC) (src, mask, dst);
+    present_gc_wrap(priv, dst);
+}
+
+static void
+present_destroy_gc(GCPtr gc)
+{
+    present_gc_priv_ptr priv = present_gc_priv(gc);
+
+    /* The GC is freed right after; no need to re-install anything. */
+    present_gc_unwrap(priv, gc);
+    (*gc->funcs->DestroyGC) (gc);
+}
+
+static void
+present_change_clip(GCPtr gc, int type, void *pvalue, int nrects)
+{
+    present_gc_priv_ptr priv = present_gc_priv(gc);
+
+    present_gc_unwrap(priv, gc);
+    (*gc->funcs->ChangeClip) (gc, type, pvalue, nrects);
+    present_gc_wrap(priv, gc);
+}
+
+static void
+present_destroy_clip(GCPtr gc)
+{
+    present_gc_priv_ptr priv = present_gc_priv(gc);
+
+    present_gc_unwrap(priv, gc);
+    (*gc->funcs->DestroyClip) (gc);
+    present_gc_wrap(priv, gc);
+}
+
+static void
+present_copy_clip(GCPtr dst, GCPtr src)
+{
+    present_gc_priv_ptr priv = present_gc_priv(dst);
+
+    present_gc_unwrap(priv, dst);
+    (*dst->funcs->CopyClip) (dst, src);
+    present_gc_wrap(priv, dst);
+}
+
+static RegionPtr
+present_gc_copy_area(DrawablePtr pSrc, DrawablePtr pDst, GCPtr gc,
+                     int srcx, int srcy, int w, int h, int dstx, int dsty)
+{
+    present_gc_priv_ptr priv = present_gc_priv(gc);
+    RegionPtr exposed;
+
+    present_gc_unwrap(priv, gc);
+    /* A root copy overlapping a per-CRTC flip is split between the root and
+     * the flip buffers; anything else is a plain CopyArea. */
+    if (!present_flip_copy_area(pSrc, pDst, gc, srcx, srcy, w, h, dstx, dsty,
+                                &exposed))
+        exposed = (*gc->ops->CopyArea) (pSrc, pDst, gc, srcx, srcy, w, h,
+                                        dstx, dsty);
+    present_gc_wrap(priv, gc);
+    return exposed;
+}
+
+static Bool
+present_create_gc(GCPtr gc)
+{
+    ScreenPtr screen = gc->pScreen;
+    present_screen_priv_ptr screen_priv = present_screen_priv(screen);
+    Bool ret;
+
+    PRESENT_UNWRAP_HOOK(screen_priv, screen, CreateGC);
+    ret = (*screen->CreateGC) (gc);
+    if (ret) {
+        present_gc_priv_ptr priv = present_gc_priv(gc);
+
+        priv->ops = NULL;
+        priv->funcs = gc->funcs;
+        gc->funcs = &present_gc_funcs;
+    }
+    PRESENT_WRAP_HOOK(screen_priv, screen, CreateGC, present_create_gc);
+    return ret;
+}
+
 Bool
 present_screen_register_priv_keys(void)
 {
@@ -272,6 +453,16 @@ present_screen_init(ScreenPtr screen, present_screen_info_ptr info)
             screen_priv->info = NULL;
         }
         present_scmd_init_mode_hooks(screen_priv);
+
+        /* Root CopyArea substitution is only needed where per-CRTC flips can
+         * happen. Called from the DDX's ScreenInit, before any GC exists, so
+         * the GC private can still be registered here. */
+        if (info && info->version >= 2 && info->capable_flip_crtc) {
+            if (!dixRegisterPrivateKey(&present_gc_private_key, PRIVATE_GC,
+                                       sizeof(present_gc_priv_rec)))
+                return FALSE;
+            PRESENT_WRAP_HOOK(screen_priv, screen, CreateGC, present_create_gc);
+        }
 
         present_fake_screen_init(screen);
     }
