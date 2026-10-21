@@ -885,6 +885,7 @@ static pid_t pid_guard = 0;                /**< pid of the connected guard */
 static Bool xnotify_enabled = TRUE;        /**< runtime master switch (DISABLE command) */
 
 static void XnotifyInitCommand(void);
+static void XnotifySendStatus(void);
 static Bool XnotifyIsGuardAlive(void);
 static void XnotifyCommandReadable(int fd, int ready, void *data);
 static CARD32 XnotifyGuardLivenessTimer(OsTimerPtr timer, CARD32 now, void *arg);
@@ -958,6 +959,11 @@ XnotifyIsGuardAlive(void) {
         XnotifyClearAllDynamicPermissions();
         guard_active = FALSE;
         pid_guard = 0;
+        /* A runtime DISABLE only lasts while a guard is alive to report it to
+         * the user; fail closed so a dead guard cannot leave us unprotected. */
+        if (!xnotify_enabled)
+            ErrorF("Xnotify: guard gone while disabled - re-enabling\n");
+        xnotify_enabled = TRUE;
         XnotifyLoadConfig();
         return FALSE;
     }
@@ -1244,9 +1250,12 @@ XnotifyCommandReadable(int fd, int ready, void *arg) {
 static CARD32
 XnotifyGuardLivenessTimer(OsTimerPtr timer, CARD32 now, void *arg) {
     (void)timer; (void)now; (void)arg;
-    if (XnotifyIsGuardAlive())
-        return GUARD_HEARTBEAT_TIMEOUT;
-    return 0;
+    if (!XnotifyIsGuardAlive())
+        return 0;
+    /* Keep telling the guard we are disabled so it can keep the user informed. */
+    if (!xnotify_enabled)
+        XnotifySendStatus();
+    return GUARD_HEARTBEAT_TIMEOUT;
 }
 
 static void
@@ -1566,6 +1575,9 @@ XnotifyPoll(void) {
         }
 
         if (strstr(buf, "\"command\":\"DISABLE\"")) {
+            /* Count the sender as the live guard so the watchdog is armed and
+             * the disable is bounded by its lifetime. */
+            XnotifyGuardHeartbeat(peer_pid);
             if (xnotify_enabled) {
                 xnotify_enabled = FALSE;
                 ErrorF("Xnotify: disabled at runtime (rules retained)\n");
