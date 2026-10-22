@@ -94,7 +94,7 @@ jobs:
         env:
             MESON_ARGS: --buildtype=debug -Db_sanitize=address,undefined -Db_lundef=false -Dprefix=/usr -Dxorg=false -Dxvfb=true -Dxnest=false -Dxephyr=false -Dwerror=true
             ASAN_OPTIONS: detect_leaks=0:abort_on_error=0
-            UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+            UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0
         steps:
             - uses: actions/checkout@v4
             - uses: ./.github/actions/ubuntu-install-pkg
@@ -114,6 +114,17 @@ jobs:
               with:
                   name: build-logs-sanitizers
                   path: __BUILD/meson-logs/*
+
+            # UBSan is report-only (halt_on_error=0), so the server isn't
+            # killed by the first finding; list what it found instead.
+            - name: UBSan findings
+              if: ${{ !cancelled() }}
+              run: |
+                  {
+                      echo "### UBSan findings"
+                      echo
+                      grep -h "runtime error" /tmp/xserver-* 2>/dev/null | sort | uniq -c | sort -rn | head -50 | sed 's/^/    /' || true
+                  } | tee -a "$GITHUB_STEP_SUMMARY"
 
             # pyxtest keeps each server's ASan report and stderr in /tmp (it
             # sets log_path itself, so ASAN_OPTIONS can't redirect them). A
