@@ -24,6 +24,8 @@
 
 #include <dix-config.h>
 
+#include <string.h>
+
 #include "dix/screenint_priv.h"
 #include "os/bug_priv.h"
 #include "os/xsha1.h"
@@ -190,7 +192,9 @@ GlyphPtr
 FindGlyphByHash(unsigned char sha1[20], int format)
 {
     GlyphRefPtr gr;
-    CARD32 signature = *(CARD32 *) sha1;
+    CARD32 signature;
+
+    memcpy(&signature, sha1, sizeof(signature));    /* sha1 is not aligned */
 
     if (!globalGlyphs[format].hashSet)
         return NULL;
