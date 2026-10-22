@@ -1,0 +1,156 @@
+# XiS fork CI: lint, sanitizers, release/debug builds and the Xorg test suite.
+# Everything upstream-specific (other OSes, cross builds, qemu, docker images)
+# was dropped on purpose. No packages are produced here yet.
+name: XiS CI
+
+permissions:
+    contents: read
+
+env:
+    MESON_BUILDDIR:  "__BUILD"
+    X11_PREFIX:      /home/runner/x11
+    X11_BUILD_DIR:   /home/runner/work/xserver/xserver/WORK/sources/3rdparty
+    GOXPROTO_REF:    v0.0.8
+
+on:
+    push:
+    pull_request:
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    build:
+        # Plain release/debug builds with -Werror. The distro matrix
+        # (Debian 12/13, Ubuntu 22.04/24.04 in containers) comes later.
+        name: build (${{ matrix.buildtype }})
+        runs-on: ubuntu-24.04
+        strategy:
+            fail-fast: false
+            matrix:
+                buildtype: [release, debug]
+        env:
+            MESON_ARGS: --buildtype=${{ matrix.buildtype }} -Dprefix=/usr -Dxorg=true -Dxvfb=true -Dxephyr=true -Dxnest=true -Dxfbdev=true -Dxcsecurity=true -Dwerror=true -Dtest_xephyr_gles=false
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/ubuntu-install-pkg
+            - name: xorgproto (runner image is too old for presentproto >= 1.4)
+              run: |
+                  echo "PKG_CONFIG_PATH=$X11_PREFIX/share/pkgconfig:$X11_PREFIX/lib/$(gcc -dumpmachine)/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+                  . .github/scripts/util.sh
+                  mkdir -p "$X11_BUILD_DIR"
+                  cd "$X11_BUILD_DIR"
+                  build_meson xorgproto $(fdo_mirror xorgproto) "$PKG_XORGPROTO_REF"
+            - name: build and meson test
+              run: .github/scripts/meson-build.sh --run-test
+              env:
+                  MESON_TEST_ARGS: --no-rebuild
+            - uses: actions/upload-artifact@v4
+              if: failure()
+              with:
+                  name: build-logs-${{ matrix.buildtype }}
+                  path: __BUILD/meson-logs/*
+
+    sanitizers:
+        # AddressSanitizer + UBSanitizer on Xvfb, running meson test (unit
+        # tests + pyxtest). Leak detection is off: the server deliberately
+        # does not free everything on exit, which would fail every test.
+        runs-on: ubuntu-24.04
+        env:
+            MESON_ARGS: --buildtype=debug -Db_sanitize=address,undefined -Db_lundef=false -Dprefix=/usr -Dxorg=false -Dxvfb=true -Dxnest=false -Dxephyr=false -Dwerror=true
+            ASAN_OPTIONS: detect_leaks=0:abort_on_error=0
+            UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/ubuntu-install-pkg
+            - name: xorgproto
+              run: |
+                  echo "PKG_CONFIG_PATH=$X11_PREFIX/share/pkgconfig:$X11_PREFIX/lib/$(gcc -dumpmachine)/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+                  . .github/scripts/util.sh
+                  mkdir -p "$X11_BUILD_DIR"
+                  cd "$X11_BUILD_DIR"
+                  build_meson xorgproto $(fdo_mirror xorgproto) "$PKG_XORGPROTO_REF"
+            - name: build and meson test (ASan + UBSan)
+              run: .github/scripts/meson-build.sh --run-test
+              env:
+                  MESON_TEST_ARGS: --no-rebuild
+            - uses: actions/upload-artifact@v4
+              if: failure()
+              with:
+                  name: build-logs-sanitizers
+                  path: __BUILD/meson-logs/*
+
+    lint:
+        # clang-tidy (config in .clang-tidy) on the C files this push/PR
+        # touched, plus the manpage placeholder check.
+        runs-on: ubuntu-24.04
+        env:
+            MESON_BUILDDIR: build
+            MESON_ARGS: --buildtype=debug -Dprefix=/usr -Dxorg=true -Dxvfb=true -Dxephyr=true -Dxnest=true -Dxfbdev=true
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - uses: ./.github/actions/ubuntu-install-pkg
+            - name: xorgproto + clang-tidy
+              run: |
+                  sudo apt-get install -y clang-tidy
+                  echo "PKG_CONFIG_PATH=$X11_PREFIX/share/pkgconfig:$X11_PREFIX/lib/$(gcc -dumpmachine)/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+                  . .github/scripts/util.sh
+                  mkdir -p "$X11_BUILD_DIR"
+                  cd "$X11_BUILD_DIR"
+                  build_meson xorgproto $(fdo_mirror xorgproto) "$PKG_XORGPROTO_REF"
+            - name: configure and build (compile_commands.json + generated headers)
+              run: .github/scripts/meson-build.sh --skip-test
+            - name: manpage placeholders
+              run: .github/scripts/manpages-check
+            - name: clang-tidy on changed files
+              env:
+                  BEFORE: ${{ github.event.before }}
+                  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+              run: |
+                  base="${BASE_SHA:-$BEFORE}"
+                  case "$base" in ""|0000000000000000000000000000000000000000) base="HEAD~1" ;; esac
+                  git cat-file -e "$base^{commit}" 2>/dev/null || base="HEAD~1"
+                  files="$(git diff --name-only --diff-filter=d "$base" HEAD -- '*.c' | grep -v '^test/' || true)"
+                  if [ -z "$files" ]; then echo "no C files changed"; exit 0; fi
+                  echo "$files" | xargs -r -P"$(nproc)" -n1 clang-tidy -p build --quiet
+
+    xorg-testsuite:
+        # Xorg's own suite: unit tests, XTS, piglit and rendercheck, using
+        # the prerequisite builder shared with upstream. Slowest job.
+        runs-on: ubuntu-24.04
+        env:
+            MESON_ARGS: -Dprefix=/usr -Dxephyr=true -Dwerror=true -Dxcsecurity=true -Dxorg=true -Dxvfb=true -Dxnest=true -Dxfbdev=true -Dtest_xephyr_gles=false
+            LIBGL_ALWAYS_SOFTWARE: 1
+            GALLIUM_DRIVER: llvmpipe
+            PIGLIT_PLATFORM: x11_egl
+        steps:
+            - uses: actions/checkout@v4
+            - uses: ./.github/actions/ubuntu-install-pkg
+            - name: prepare build environment
+              run: |
+                  MACHINE=`gcc -dumpmachine`
+                  echo "MACHINE=$MACHINE" >> "$GITHUB_ENV"
+                  echo "PKG_CONFIG_PATH=$X11_PREFIX/share/pkgconfig:$X11_PREFIX/lib/$MACHINE/pkgconfig:$X11_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+                  sudo chown root /bin/tar && sudo chmod u+s /bin/tar
+            - name: X11 prereq cache
+              uses: actions/cache@v5
+              with:
+                  path: |
+                      ${{ env.X11_PREFIX }}
+                      ${{ env.X11_BUILD_DIR }}/xts
+                      ${{ env.X11_BUILD_DIR }}/piglit
+                      ${{ env.X11_BUILD_DIR }}/goxproto
+                  key: ${{ runner.name }}-x11-deps-${{ hashFiles('.github/scripts/ubuntu/install-prereq.sh') }}
+                  restore-keys: ${{ runner.name }}-x11-deps-
+            - name: build and test
+              run: .github/scripts/ubuntu/run-xserver-build-and-test.sh
+            - uses: actions/upload-artifact@v4
+              if: always()
+              with:
+                  name: build-logs-testsuite
+                  path: |
+                      __BUILD/meson-logs/*
+                      __BUILD/test/piglit-results/*
