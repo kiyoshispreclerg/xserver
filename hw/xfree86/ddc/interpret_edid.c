@@ -89,13 +89,6 @@ static int cea_db_len(uint8_t *db);
 static int cea_db_tag(uint8_t *db);
 
 static void
-find_ranges_section(struct detailed_monitor_section *det, void *ranges)
-{
-    if (det->type == DS_RANGES && det->section.ranges.max_clock)
-        *(struct monitor_ranges **) ranges = &det->section.ranges;
-}
-
-static void
 find_max_detailed_clock(struct detailed_monitor_section *det, void *ret)
 {
     if (det->type == DT) {
@@ -107,6 +100,7 @@ static void
 handle_edid_quirks(xf86MonPtr m)
 {
     struct monitor_ranges *ranges = NULL;
+    int i;
 
     /*
      * max_clock is only encoded in EDID in tens of MHz, so occasionally we
@@ -115,8 +109,16 @@ handle_edid_quirks(xf86MonPtr m)
      * see how well this works.
      */
 
-    /* Try to find Monitor Range and max clock, then re-set range value */
-    xf86ForEachDetailedBlock(m, find_ranges_section, &ranges);
+    /* Try to find Monitor Range and max clock, then re-set range value.
+     * Only the base block descriptors are searched: the CEA extension ones
+     * are parsed into a temporary that is gone once the walk returns, so a
+     * pointer to them can neither be kept nor written through. */
+    for (i = 0; i < DET_TIMINGS; i++) {
+        struct detailed_monitor_section *det = m->det_mon + i;
+
+        if (det->type == DS_RANGES && det->section.ranges.max_clock)
+            ranges = &det->section.ranges;
+    }
     if (ranges && ranges->max_clock) {
         int clock = 0;
 
