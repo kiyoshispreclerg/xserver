@@ -3272,7 +3272,8 @@ static Status
 XkbComputeGetIndicatorMapReplySize(XkbIndicatorPtr indicators,
                                    xkbGetIndicatorMapReply * rep)
 {
-    register int i, bit;
+    register int i;
+    register unsigned int bit;  /* unsigned: reaches bit 31 */
     int nIndicators;
 
     rep->realIndicators = indicators->phys_indicators;
