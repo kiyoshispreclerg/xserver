@@ -115,6 +115,18 @@ jobs:
                   name: build-logs-sanitizers
                   path: __BUILD/meson-logs/*
 
+            # pyxtest keeps each server's ASan report and stderr in /tmp (it
+            # sets log_path itself, so ASAN_OPTIONS can't redirect them). A
+            # server that crashes mid-test is reported by pytest only as
+            # "Server crashed", so these files are where the stack trace is.
+            - uses: actions/upload-artifact@v4
+              if: ${{ !cancelled() }}
+              with:
+                  name: asan-reports
+                  path: |
+                      /tmp/xserver-*
+                  if-no-files-found: ignore
+
     xorg-testsuite:
         # Xorg's own suite: unit tests, XTS, piglit and rendercheck, using
         # the prerequisite builder shared with upstream. Slowest job.
