@@ -28,12 +28,16 @@ jobs:
         # failed, so one problem doesn't hide the others. The distro matrix
         # (Debian 12/13, Ubuntu 22.04/24.04 in containers) comes later.
         runs-on: ubuntu-24.04
+        timeout-minutes: 40
         env:
             COMMON_ARGS: -Dprefix=/usr -Dxorg=true -Dxvfb=true -Dxephyr=true -Dxnest=true -Dxfbdev=true -Dxcsecurity=true -Dwerror=true -Dtest_xephyr_gles=false
         steps:
             - uses: actions/checkout@v4
               with:
                   fetch-depth: 0
+            - name: apt retries and timeouts (a slow mirror must not hang the job)
+              run: |
+                  printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/80-ci-retries
             - uses: ./.github/actions/ubuntu-install-pkg
             - name: xorgproto (runner image is too old for presentproto >= 1.4) + clang-tidy
               run: |
@@ -91,12 +95,16 @@ jobs:
         # tests + pyxtest). Leak detection is off: the server deliberately
         # does not free everything on exit, which would fail every test.
         runs-on: ubuntu-24.04
+        timeout-minutes: 30
         env:
             MESON_ARGS: --buildtype=debug -Db_sanitize=address,undefined -Db_lundef=false -Dprefix=/usr -Dxorg=false -Dxvfb=true -Dxnest=false -Dxephyr=false -Dwerror=true
             ASAN_OPTIONS: detect_leaks=0:abort_on_error=0
             UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0
         steps:
             - uses: actions/checkout@v4
+            - name: apt retries and timeouts (a slow mirror must not hang the job)
+              run: |
+                  printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/80-ci-retries
             - uses: ./.github/actions/ubuntu-install-pkg
             - name: xorgproto
               run: |
@@ -142,6 +150,7 @@ jobs:
         # Xorg's own suite: unit tests, XTS, piglit and rendercheck, using
         # the prerequisite builder shared with upstream. Slowest job.
         runs-on: ubuntu-24.04
+        timeout-minutes: 60
         env:
             MESON_ARGS: -Dprefix=/usr -Dxephyr=true -Dwerror=true -Dxcsecurity=true -Dxorg=true -Dxvfb=true -Dxnest=true -Dxfbdev=true -Dtest_xephyr_gles=false
             LIBGL_ALWAYS_SOFTWARE: 1
@@ -149,6 +158,9 @@ jobs:
             PIGLIT_PLATFORM: x11_egl
         steps:
             - uses: actions/checkout@v4
+            - name: apt retries and timeouts (a slow mirror must not hang the job)
+              run: |
+                  printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/80-ci-retries
             - uses: ./.github/actions/ubuntu-install-pkg
             - name: prepare build environment
               run: |
