@@ -1,4 +1,4 @@
-# XiS fork CI: lint, sanitizers, release/debug builds and the Xorg test suite.
+# XiS fork CI: debug/release builds + lint, sanitizers and the Xorg test suite.
 # Everything upstream-specific (other OSes, cross builds, qemu, docker images)
 # was dropped on purpose. No packages are produced here yet.
 name: XiS CI
@@ -21,36 +21,70 @@ concurrency:
     cancel-in-progress: true
 
 jobs:
-    build:
-        # Plain release/debug builds with -Werror. The distro matrix
+    build-and-lint:
+        # Debug and release builds with -Werror, the manpage placeholder check
+        # and clang-tidy, in sequence on one VM so the package install and the
+        # xorgproto build are paid once. Each step runs even if an earlier one
+        # failed, so one problem doesn't hide the others. The distro matrix
         # (Debian 12/13, Ubuntu 22.04/24.04 in containers) comes later.
-        name: build (${{ matrix.buildtype }})
         runs-on: ubuntu-24.04
-        strategy:
-            fail-fast: false
-            matrix:
-                buildtype: [release, debug]
         env:
-            MESON_ARGS: --buildtype=${{ matrix.buildtype }} -Dprefix=/usr -Dxorg=true -Dxvfb=true -Dxephyr=true -Dxnest=true -Dxfbdev=true -Dxcsecurity=true -Dwerror=true -Dtest_xephyr_gles=false
+            COMMON_ARGS: -Dprefix=/usr -Dxorg=true -Dxvfb=true -Dxephyr=true -Dxnest=true -Dxfbdev=true -Dxcsecurity=true -Dwerror=true -Dtest_xephyr_gles=false
         steps:
             - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
             - uses: ./.github/actions/ubuntu-install-pkg
-            - name: xorgproto (runner image is too old for presentproto >= 1.4)
+            - name: xorgproto (runner image is too old for presentproto >= 1.4) + clang-tidy
               run: |
+                  sudo apt-get install -y clang-tidy
                   echo "PKG_CONFIG_PATH=$X11_PREFIX/share/pkgconfig:$X11_PREFIX/lib/$(gcc -dumpmachine)/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
                   . .github/scripts/util.sh
                   mkdir -p "$X11_BUILD_DIR"
                   cd "$X11_BUILD_DIR"
                   build_meson xorgproto $(fdo_mirror xorgproto) "$PKG_XORGPROTO_REF"
-            - name: build and meson test
-              run: .github/scripts/meson-build.sh --run-test
+
+            # The debug tree is called "build" because manpages-check looks
+            # there, and clang-tidy uses its compile_commands.json.
+            - name: build and meson test (debug)
               env:
+                  MESON_BUILDDIR: build
+                  MESON_ARGS: --buildtype=debug ${{ env.COMMON_ARGS }}
                   MESON_TEST_ARGS: --no-rebuild
+              run: .github/scripts/meson-build.sh --run-test
+
+            - name: build and meson test (release)
+              if: ${{ !cancelled() }}
+              env:
+                  MESON_BUILDDIR: __BUILD
+                  MESON_ARGS: --buildtype=release ${{ env.COMMON_ARGS }}
+                  MESON_TEST_ARGS: --no-rebuild
+              run: .github/scripts/meson-build.sh --run-test
+
+            - name: manpage placeholders
+              if: ${{ !cancelled() && hashFiles('build/build.ninja') != '' }}
+              run: .github/scripts/manpages-check
+
+            - name: clang-tidy on changed files
+              if: ${{ !cancelled() && hashFiles('build/compile_commands.json') != '' }}
+              env:
+                  BEFORE: ${{ github.event.before }}
+                  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+              run: |
+                  base="${BASE_SHA:-$BEFORE}"
+                  case "$base" in ""|0000000000000000000000000000000000000000) base="HEAD~1" ;; esac
+                  git cat-file -e "$base^{commit}" 2>/dev/null || base="HEAD~1"
+                  files="$(git diff --name-only --diff-filter=d "$base" HEAD -- '*.c' | grep -v '^test/' || true)"
+                  if [ -z "$files" ]; then echo "no C files changed"; exit 0; fi
+                  echo "$files" | xargs -r -P"$(nproc)" -n1 clang-tidy -p build --quiet
+
             - uses: actions/upload-artifact@v4
               if: failure()
               with:
-                  name: build-logs-${{ matrix.buildtype }}
-                  path: __BUILD/meson-logs/*
+                  name: build-logs
+                  path: |
+                      build/meson-logs/*
+                      __BUILD/meson-logs/*
 
     sanitizers:
         # AddressSanitizer + UBSanitizer on Xvfb, running meson test (unit
@@ -80,42 +114,6 @@ jobs:
               with:
                   name: build-logs-sanitizers
                   path: __BUILD/meson-logs/*
-
-    lint:
-        # clang-tidy (config in .clang-tidy) on the C files this push/PR
-        # touched, plus the manpage placeholder check.
-        runs-on: ubuntu-24.04
-        env:
-            MESON_BUILDDIR: build
-            MESON_ARGS: --buildtype=debug -Dprefix=/usr -Dxorg=true -Dxvfb=true -Dxephyr=true -Dxnest=true -Dxfbdev=true
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  fetch-depth: 0
-            - uses: ./.github/actions/ubuntu-install-pkg
-            - name: xorgproto + clang-tidy
-              run: |
-                  sudo apt-get install -y clang-tidy
-                  echo "PKG_CONFIG_PATH=$X11_PREFIX/share/pkgconfig:$X11_PREFIX/lib/$(gcc -dumpmachine)/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
-                  . .github/scripts/util.sh
-                  mkdir -p "$X11_BUILD_DIR"
-                  cd "$X11_BUILD_DIR"
-                  build_meson xorgproto $(fdo_mirror xorgproto) "$PKG_XORGPROTO_REF"
-            - name: configure and build (compile_commands.json + generated headers)
-              run: .github/scripts/meson-build.sh --skip-test
-            - name: manpage placeholders
-              run: .github/scripts/manpages-check
-            - name: clang-tidy on changed files
-              env:
-                  BEFORE: ${{ github.event.before }}
-                  BASE_SHA: ${{ github.event.pull_request.base.sha }}
-              run: |
-                  base="${BASE_SHA:-$BEFORE}"
-                  case "$base" in ""|0000000000000000000000000000000000000000) base="HEAD~1" ;; esac
-                  git cat-file -e "$base^{commit}" 2>/dev/null || base="HEAD~1"
-                  files="$(git diff --name-only --diff-filter=d "$base" HEAD -- '*.c' | grep -v '^test/' || true)"
-                  if [ -z "$files" ]; then echo "no C files changed"; exit 0; fi
-                  echo "$files" | xargs -r -P"$(nproc)" -n1 clang-tidy -p build --quiet
 
     xorg-testsuite:
         # Xorg's own suite: unit tests, XTS, piglit and rendercheck, using
