@@ -64,6 +64,19 @@
 #include "xace.h"
 #include "list.h"
 
+/*
+ * Extension to CursorNotify: the cursor being hidden or shown by
+ * XFixesHideCursor/ShowCursor. Changing the displayed cursor already
+ * notifies; hiding it does not (the cursor image stays the same), so a
+ * recorder had no way to know short of polling. Opt-in through its own
+ * mask bit, so clients that never ask see nothing different; a server
+ * without it rejects the bit with BadValue. cursorSerial is 1 when the
+ * cursor is hidden, 0 when shown. The current state is sent once when a
+ * client selects the bit.
+ */
+#define XFixesCursorVisibilityNotifyMask   (1L << 1)
+#define XFixesCursorVisibilityNotify       1
+
 static RESTYPE CursorClientType;
 static RESTYPE CursorHideCountType;
 static RESTYPE CursorWindowType;
@@ -153,6 +166,31 @@ CursorForClient(ClientPtr client)
 }
 
 static Bool
+CursorHidden(void)
+{
+    int i;
+
+    for (i = 0; i < screenInfo.numScreens; i++)
+        if (GetCursorScreen(screenInfo.screens[i])->pCursorHideCounts != NULL)
+            return TRUE;
+    return FALSE;
+}
+
+static void
+CursorSendVisibility(CursorEventPtr e, Bool hidden)
+{
+    xXFixesCursorNotifyEvent ev = {
+        .type = XFixesEventBase + XFixesCursorNotify,
+        .subtype = XFixesCursorVisibilityNotify,
+        .window = e->pWindow->drawable.id,
+        .cursorSerial = hidden ? 1 : 0,
+        .timestamp = currentTime.milliseconds,
+        .name = None
+    };
+    WriteEventsToClient(e->pClient, 1, (xEvent *) &ev);
+}
+
+static Bool
 CursorDisplayCursor(DeviceIntPtr pDev, ScreenPtr pScreen, CursorPtr pCursor)
 {
     CursorScreenPtr cs = GetCursorScreen(pScreen);
@@ -189,6 +227,21 @@ CursorDisplayCursor(DeviceIntPtr pDev, ScreenPtr pScreen, CursorPtr pCursor)
             }
         }
     }
+    {
+        static Bool last_hidden = FALSE;
+        Bool hidden = CursorHidden();
+
+        if (hidden != last_hidden) {
+            CursorEventPtr e;
+
+            last_hidden = hidden;
+            UpdateCurrentTimeIf();
+            for (e = cursorEvents; e; e = e->next) {
+                if (e->eventMask & XFixesCursorVisibilityNotifyMask)
+                    CursorSendVisibility(e, hidden);
+            }
+        }
+    }
     Wrap(cs, pScreen, DisplayCursor, backupProc);
 
     return ret;
@@ -205,7 +258,7 @@ static void CursorScreenClose(CallbackListPtr *pcbl, ScreenPtr pScreen, void *un
     deleteCursorHideCountsForScreen(pScreen);
 }
 
-#define CursorAllEvents (XFixesDisplayCursorNotifyMask)
+#define CursorAllEvents (XFixesDisplayCursorNotifyMask | XFixesCursorVisibilityNotifyMask)
 
 static int
 XFixesSelectCursorInput(ClientPtr pClient, WindowPtr pWindow, CARD32 eventMask)
@@ -213,6 +266,7 @@ XFixesSelectCursorInput(ClientPtr pClient, WindowPtr pWindow, CARD32 eventMask)
     CursorEventPtr *prev, e;
     void *val;
     int rc;
+    Bool newly;
 
     for (prev = &cursorEvents; (e = *prev); prev = &e->next) {
         if (e->pClient == pClient && e->pWindow == pWindow) {
@@ -253,7 +307,12 @@ XFixesSelectCursorInput(ClientPtr pClient, WindowPtr pWindow, CARD32 eventMask)
 
         *prev = e;
     }
+    /* A client selecting the visibility bit learns the current state once */
+    newly = (eventMask & XFixesCursorVisibilityNotifyMask) &&
+            !(e->eventMask & XFixesCursorVisibilityNotifyMask);
     e->eventMask = eventMask;
+    if (newly)
+        CursorSendVisibility(e, CursorHidden());
     return Success;
 }
 
