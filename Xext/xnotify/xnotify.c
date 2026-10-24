@@ -405,17 +405,17 @@ XnotifyLoadConfig(void) {
 }
 
 /**
- * @brief reload the static configuration at runtime, without touching clients
+ * @brief reload the static configuration at runtime
  *
  * A lighter-weight alternative to what happens when the guard dies: it does
- * NOT invalidate per-client cached permission masks, does NOT drop the guard
- * connection, and does NOT clear the pid/exe or pending-notification caches -
- * it only wipes the rule table (both the hash table and the ordered list) and
- * calls XnotifyLoadConfig() again, exactly as if the extension were
- * restarting internally. Already-running clients keep whatever bits their
- * cache already holds; only lookups that miss the per-client cache will see
- * the freshly reloaded rules. Meant to be triggered on demand by the external
- * guard (RELOAD command) after the on-disk config has changed.
+ * NOT drop the guard connection and does NOT clear the pid/exe or
+ * pending-notification caches - it only wipes the rule table (both the hash
+ * table and the ordered list) and calls XnotifyLoadConfig() again, exactly as
+ * if the extension were restarting internally. This function itself does not
+ * touch the per-client cached masks; the RELOAD command handler invalidates
+ * them right after, so clients re-evaluate against the freshly reloaded
+ * rules. Meant to be triggered on demand by the external guard (RELOAD
+ * command) after the on-disk config has changed.
  */
 void
 XnotifyReloadConfig(void) {
@@ -1599,9 +1599,12 @@ XnotifyPoll(void) {
             continue;
         }
         if (strstr(buf, "\"command\":\"RELOAD\"")) {
-            /* Deliberately not routed through permissions_changed: a reload
-             * must not invalidate already-connected clients' cached masks. */
+            /* A reload resets the whole rule book (dynamic rules and the
+             * global allow mask included), so drop every client's cached mask
+             * too, otherwise already-connected clients keep access that the
+             * reloaded rules no longer grant. */
             XnotifyReloadConfig();
+            XnotifyInvalidateAllClientCaches();
             XnotifySendStatus();
             continue;
         }
