@@ -131,6 +131,7 @@ typedef struct {
     Bool dri2_enable;
     Bool present_enable;
     Bool tearfree_enable;
+    Bool per_crtc_flip;
 
     uint32_t vrr_prop_id;
     Bool use_ctm;
