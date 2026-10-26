@@ -1556,6 +1556,61 @@ XnotifyIsAllowed(ClientPtr client, const int action) {
 }
 
 /**
+ * @brief non-prompting check for an explicitly granted privilege
+ *
+ * Unlike XnotifyIsAllowed(), this never fast-passes when enforcement is off and
+ * never notifies the guard: it answers TRUE only when the action is actually
+ * granted to the client (cached mask, global allow mask or a config/guard
+ * rule). Meant for privileges that must stay opt-in even with Xnotify
+ * disabled, such as GRAB_OVERRIDE, and for asking about a client other than
+ * the one making the request.
+ *
+ * @param client the X11 client to check
+ * @param action XNOTIFY_* action bit
+ * @return TRUE if explicitly granted
+ */
+Bool
+XnotifyHasGrant(ClientPtr client, const int action) {
+    if (!client || !security_mode ||
+        !dixPrivateKeyRegistered(&xnotify_client_priv_key))
+        return FALSE;
+
+    uint32_t bit = (1U << (action - 1));
+
+    if ((*XnotifyPermMask(client) & bit) || (xnotify_global_allow_mask & bit))
+        return TRUE;
+
+    ClientExeInfo info = GetClientExeInfo(client);
+    if (!info.exe)
+        return FALSE;
+
+    XPermEntry *entry = find_matching_entry(&info);
+    Bool granted = entry && (entry->perm_mask & bit);
+
+    free(info.exe);
+    free(info.args);
+    return granted;
+}
+
+/**
+ * @brief permission gate for opt-in privileges
+ *
+ * While Xnotify is enforcing this is XnotifyIsAllowed() (the guard may be
+ * asked); otherwise it falls back to XnotifyHasGrant(), so the privilege is
+ * denied unless a rule explicitly grants it.
+ *
+ * @param client the requesting X11 client
+ * @param action XNOTIFY_* action bit being attempted
+ * @return TRUE if granted
+ */
+Bool
+XnotifyIsGranted(ClientPtr client, const int action) {
+    if (xnotify_enabled && (XnotifyIsGuardAlive() || security_mode))
+        return XnotifyIsAllowed(client, action);
+    return XnotifyHasGrant(client, action);
+}
+
+/**
  * @brief drain and process all pending command datagrams from the guard
  *
  * Reads each queued message, verifies the sender (is_trusted_sender), and
