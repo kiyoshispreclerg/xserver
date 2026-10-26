@@ -92,6 +92,8 @@ ClientExeInfo GetClientExeInfo(ClientPtr client);
 void XnotifyReport(ClientPtr client, const int action);
 void XnotifyAddPending(const char *exe, int action);
 Bool XnotifyIsAllowed(ClientPtr client, const int action);
+Bool XnotifyHasGrant(ClientPtr client, const int action);
+Bool XnotifyIsGranted(ClientPtr client, const int action);
 void XnotifyAllowExe(const int action, const char *exe_path, const char *args);
 void XnotifyDenyExe(const int action, const char *exe_path);
 void XnotifyAllowAction(const int action);
