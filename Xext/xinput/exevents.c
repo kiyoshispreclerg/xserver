@@ -678,10 +678,17 @@ DeepCopyPointerClasses(DeviceIntPtr from, DeviceIntPtr to)
                 to->touch->num_touches = from->touch->num_touches;
                 to->touch->touches = calloc(to->touch->num_touches,
                                             sizeof(TouchPointInfoRec));
+                /*
+                 * Checking 'to->touch' here (as this used to) is always
+                 * true -- it was just allocated a few lines above. The
+                 * allocation that can actually fail is 'touches', right
+                 * above, which TouchInitTouchPoint() then indexes
+                 * unconditionally.
+                 */
+                if (!to->touch->touches)
+                    FatalError("[Xi] no memory for class shift.\n");
                 for (i = 0; i < to->touch->num_touches; i++)
                     TouchInitTouchPoint(to->touch, to->valuator, i);
-                if (!to->touch)
-                    FatalError("[Xi] no memory for class shift.\n");
             }
             else
                 classes->touch = NULL;
@@ -1185,7 +1192,7 @@ TouchPuntToNextOwner(DeviceIntPtr dev, TouchPointInfoPtr ti,
     int accepted_early = listener->state == TOUCH_LISTENER_EARLY_ACCEPT;
 
     /* Deliver the ownership */
-    if (listener->state == TOUCH_LISTENER_AWAITING_OWNER || accepted_early)
+    if ((listener->state == TOUCH_LISTENER_AWAITING_OWNER || accepted_early) && ev)
         DeliverTouchEvents(dev, ti, (InternalEvent *) ev,
                            listener->listener);
     else if (listener->state == TOUCH_LISTENER_AWAITING_BEGIN) {
@@ -2188,6 +2195,9 @@ DeliverTouchEvents(DeviceIntPtr dev, TouchPointInfoPtr ti,
                    InternalEvent *ev, XID resource)
 {
     int i;
+
+    if (!ev)
+        return;
 
     if (ev->any.type == ET_TouchBegin &&
         !(ev->device_event.flags & (TOUCH_CLIENT_ID | TOUCH_REPLAYING)))

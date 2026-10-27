@@ -26,14 +26,28 @@
  * prior written authorization.
  */
 
-#include <assert.h>
+#include "osxcompat.h"
+
 #include <mach-o/dyld.h>
 #include <libgen.h>
 #include <spawn.h>
 #include <sys/syslimits.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+
+/* os_log is only available on 10.12 and later, fall back to ASL on older systems */
+#ifdef HAS_OS_LOG
+#include <os/log.h>
+#define trampoline_log_error(...) os_log_error(OS_LOG_DEFAULT, __VA_ARGS__)
+#define PUBLIC_S "%{public}s"
+#else
+#include <asl.h>
+#define trampoline_log_error(...) asl_log(NULL, NULL, ASL_LEVEL_ERR, __VA_ARGS__)
+#define PUBLIC_S "%s"
+#endif
 
 /* We want XQuartz.app to inherit a login shell environment.  This is handled by the X11.sh
  * script which re-execs the main binary from a login shell environment.  However, recent
@@ -57,7 +71,10 @@ static char *executable_path(void) {
     if (_NSGetExecutablePath(buf, &bufsize) == -1) {
         free(buf);
         buf = calloc(1, bufsize);
-        assert(_NSGetExecutablePath(buf, &bufsize) == 0);
+        if (_NSGetExecutablePath(buf, &bufsize) != 0) {
+            trampoline_log_error("Failed to determine executable path");
+            abort();
+        }
     }
 
     return buf;
@@ -72,16 +89,31 @@ int main(int argc, char **argv, char **envp) {
         free(executable);
         asprintf(&executable, "%s/X11", executable_directory);
     }
-    assert(access(executable, X_OK) == 0);
+    if (access(executable, X_OK) != 0) {
+        trampoline_log_error("Cannot execute " PUBLIC_S ": " PUBLIC_S, executable, strerror(errno));
+        abort();
+    }
 
     argv[0] = executable;
 
     posix_spawnattr_t attr;
-    assert(posix_spawnattr_init(&attr) == 0);
-    assert(posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETEXEC) == 0);
+    int error = posix_spawnattr_init(&attr);
+    if (error != 0) {
+        trampoline_log_error("posix_spawnattr_init failed: " PUBLIC_S, strerror(error));
+        abort();
+    }
+    error = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETEXEC);
+    if (error != 0) {
+        trampoline_log_error("posix_spawnattr_setflags failed: " PUBLIC_S, strerror(error));
+        abort();
+    }
 
     pid_t child_pid;
-    assert(posix_spawn(&child_pid, executable, NULL, &attr, argv, envp) == 0);
+    error = posix_spawn(&child_pid, executable, NULL, &attr, argv, envp);
+    if (error != 0) {
+        trampoline_log_error("posix_spawn failed for " PUBLIC_S ": " PUBLIC_S, executable, strerror(error));
+        abort();
+    }
 
     return EXIT_FAILURE;
 }

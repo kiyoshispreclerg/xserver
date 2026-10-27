@@ -4338,11 +4338,15 @@ drmmode_create_lease(RRLeasePtr lease, int *fd)
     int lease_fd;
     uint32_t *objects;
     drmmode_lease_private_ptr   lease_private;
+    Bool universalplanes = FALSE;
 
     nobjects = ncrtc + noutput;
 
-    if (ms->atomic_modeset)
+    /* Atomic modesetting, or tearfree with pageflipping, enables universal planes */
+    if (ms->atomic_modeset || (ms->drmmode.pageflip && ms->drmmode.tearfree_enable)) {
+        universalplanes = TRUE;
         nobjects += ncrtc; /* account for planes as well */
+    }
 
     if (nobjects == 0)
         return BadValue;
@@ -4366,7 +4370,7 @@ drmmode_create_lease(RRLeasePtr lease, int *fd)
         drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
 
         objects[i++] = drmmode_crtc->mode_crtc->crtc_id;
-        if (ms->atomic_modeset)
+        if (universalplanes)
             objects[i++] = drmmode_crtc->plane_id;
     }
 
@@ -5000,6 +5004,10 @@ static void drmmode_probe_cursor_size(xf86CrtcPtr crtc)
         return;
     }
 
+    if (drmmode->fixed_size_cursor) {
+        return;
+    }
+
     xf86DrvMsg(crtc->scrn->scrnIndex, X_WARNING,
                "Probing the cursor size using the old method\n");
 
@@ -5288,6 +5296,16 @@ drmmode_crtc_set_vrr(xf86CrtcPtr crtc, Bool enabled)
  * We hook the screen's cursor-sprite (swcursor) functions to see if a swcursor
  * is active. When a swcursor is active we disable page-flipping.
  */
+
+static msSpritePrivPtr
+msGetSpritePriv(DeviceIntPtr pDev, modesettingPtr ms, ScreenPtr pScreen)
+{
+    if (!InputDevIsFloating(pDev))
+        pDev = GetMaster(pDev, MASTER_POINTER);
+    return dixLookupScreenPrivate(&(pDev)->devPrivates,
+                                  &(ms)->drmmode.spritePrivateKeyRec,
+                                  pScreen);
+}
 
 static void drmmode_sprite_do_set_cursor(msSpritePrivPtr sprite_priv,
                                          ScrnInfoPtr scrn, int x, int y)

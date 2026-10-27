@@ -617,7 +617,7 @@ ms_present_unflip_crtc(ScreenPtr screen, RRCrtcPtr crtc, uint64_t event_id)
 }
 #endif
 
-static present_screen_info_rec ms_present_screen_info = {
+static const present_screen_info_rec ms_present_screen_info = {
     .version = PRESENT_SCREEN_INFO_VERSION,
 
     .get_crtc = ms_present_get_crtc,
@@ -639,6 +639,7 @@ static present_screen_info_rec ms_present_screen_info = {
 Bool
 ms_present_screen_init(ScreenPtr screen)
 {
+    present_screen_info_rec info = ms_present_screen_info;
     ScrnInfoPtr scrn = xf86ScreenToScrn(screen);
     modesettingPtr ms = modesettingPTR(scrn);
     uint64_t value;
@@ -652,7 +653,7 @@ ms_present_screen_init(ScreenPtr screen)
                             DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP :
                             DRM_CAP_ASYNC_PAGE_FLIP, &value);
     if (ret == 0 && value == 1) {
-        ms_present_screen_info.capabilities |= PresentCapabilityAsync;
+        info.capabilities |= PresentCapabilityAsync;
         ms->drmmode.can_async_flip = TRUE;
         xf86DrvMsg(screen->myNum, X_INFO, "Async flip capable\n");
     }
@@ -667,7 +668,7 @@ ms_present_screen_init(ScreenPtr screen)
      * before. */
 #ifdef GLAMOR
     if (ms->atomic_modeset_capable) {
-        ms_present_screen_info.capable_flip_crtc = TRUE;
+        info.capable_flip_crtc = TRUE;
         xf86DrvMsg(screen->myNum, X_INFO, "Per-CRTC page flip %s by default "
                    "(Option \"PerCRTCFlip\"; per-output property PerCRTCFlip)\n",
                    ms->drmmode.per_crtc_flip ? "enabled" : "disabled");
@@ -679,5 +680,5 @@ ms_present_screen_init(ScreenPtr screen)
                    "driver; using whole-screen flips\n");
     }
 
-    return present_screen_init(screen, &ms_present_screen_info);
+    return present_screen_init(screen, &info);
 }

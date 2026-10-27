@@ -48,6 +48,10 @@
 #include "swaprep.h"
 #include "exglobals.h"          /* BadDevice */
 
+#define AllModifiersMask ( \
+    ShiftMask | LockMask | ControlMask | Mod1Mask | Mod2Mask | \
+    Mod3Mask | Mod4Mask | Mod5Mask )
+
 int
 ProcXIPassiveGrabDevice(ClientPtr client)
 {
@@ -127,7 +131,7 @@ ProcXIPassiveGrabDevice(ClientPtr client)
 
     mask_len = min(xi2mask_mask_size(mask.xi2mask), stuff->mask_len * 4);
     xi2mask_set_one_mask(mask.xi2mask, stuff->deviceid,
-                         (unsigned char *) &stuff[1], mask_len * 4);
+                         (unsigned char *) &stuff[1], mask_len);
 
     memset(&param, 0, sizeof(param));
     param.grabtype = XI2;
@@ -292,6 +296,14 @@ ProcXIPassiveUngrabDevice(ClientPtr client)
     rc = dixLookupWindow(&win, stuff->grab_window, client, DixSetAttrAccess);
     if (rc != Success)
         return rc;
+
+    modifiers = (uint32_t *) &stuff[1];
+    for (i = 0; i < stuff->num_modifiers; i++, modifiers++) {
+        if (*modifiers != XIAnyModifier && (*modifiers & ~AllModifiersMask)) {
+            client->errorValue = *modifiers;
+            return BadValue;
+        }
+    }
 
     mod_dev = (InputDevIsFloating(dev)) ? dev : GetMaster(dev, MASTER_KEYBOARD);
 

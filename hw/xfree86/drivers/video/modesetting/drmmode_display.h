@@ -94,6 +94,7 @@ typedef struct {
     drmEventContext event_context;
     struct gbm_bo *front_bo;
     Bool sw_cursor;
+    Bool fixed_size_cursor;
     Bool set_cursor_failed;
 
     /* Broken-out options. */
@@ -344,8 +345,6 @@ typedef struct _msSpritePriv {
     CursorPtr cursor;
     Bool sprite_visible;
 } msSpritePrivRec, *msSpritePrivPtr;
-
-#define msGetSpritePriv(dev, ms, screen) dixLookupScreenPrivate(&(dev)->devPrivates, &(ms)->drmmode.spritePrivateKeyRec, screen)
 
 extern miPointerSpriteFuncRec drmmode_sprite_funcs;
 

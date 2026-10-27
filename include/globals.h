@@ -8,6 +8,7 @@
 
 extern _X_EXPORT const char *defaultFontPath;
 extern _X_EXPORT int monitorResolution;
+extern _X_EXPORT Bool autosetDPI;
 extern _X_EXPORT int defaultColorVisualClass;
 /* Opt-in: recompute the per-output RandR "DPI" property from EDID physical
  * size + active mode. Off by default: outputs keep monitorResolution/96.
