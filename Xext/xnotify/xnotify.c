@@ -1293,9 +1293,6 @@ XnotifyGuardLivenessTimer(OsTimerPtr timer, CARD32 now, void *arg) {
 
 static void
 XnotifySendQueryResponse(const int action, char exes[][EXE_PATH_MAX], int count) {
-    if (notify_sock == -1)
-        return;
-
     char msg[2048];
     char exe_list[1024]= {0};
 
@@ -1314,20 +1311,17 @@ XnotifySendQueryResponse(const int action, char exes[][EXE_PATH_MAX], int count)
              "{\"command\":\"QUERY\",\"action\":%d,\"exes\":\"%s\"}\n",
              action, exe_list);
 
-    send(notify_sock, msg, strlen(msg), 0);
+    XnotifySendToGuard(msg, strlen(msg));
 }
 
 static void
 XnotifySendStatus(void) {
-    if (notify_sock == -1)
-        return;
-
     char msg[256];
     snprintf(msg, sizeof(msg),
              "{\"command\":\"STATUS\",\"enabled\":%s,\"security_mode\":%s}\n",
              xnotify_enabled ? "true" : "false",
              security_mode ? "true" : "false");
-    send(notify_sock, msg, strlen(msg), 0);
+    XnotifySendToGuard(msg, strlen(msg));
 }
 
 /**
@@ -1341,16 +1335,11 @@ XnotifySendStatus(void) {
  */
 static void
 XnotifySendConfigPath(void) {
-    if (notify_sock == -1)
-        XnotifyInit();
-    if (notify_sock == -1)
-        return;
-
     char msg[600];
     snprintf(msg, sizeof(msg),
              "{\"command\":\"CONFIG_PATH\",\"dir\":\"%s/xnotify.conf.d\",\"file\":\"%s/xnotify.conf\"}\n",
              SYSCONFDIR, SYSCONFDIR);
-    send(notify_sock, msg, strlen(msg), 0);
+    XnotifySendToGuard(msg, strlen(msg));
 }
 
 static struct {
