@@ -1171,6 +1171,39 @@ XnotifyInit(void) {
 }
 
 /**
+ * @brief send one message to the guard, reconnecting once if the peer is stale
+ *
+ * notify_sock stays connected to the socket the guard had when it was opened.
+ * A restarted guard binds a new socket at the same path, so the first send
+ * after a restart fails (ECONNREFUSED); reopen and retry once instead of
+ * dropping the message. A full guard queue (EAGAIN) still drops it.
+ *
+ * @param msg message to send
+ * @param len length of @p msg
+ * @return TRUE if the message was sent
+ */
+static Bool
+XnotifySendToGuard(const char *msg, size_t len) {
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (notify_sock == -1) {
+            XnotifyInit();
+            if (notify_sock == -1)
+                return FALSE;
+        }
+
+        if (send(notify_sock, msg, len, 0) != -1)
+            return TRUE;
+
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return FALSE;
+
+        close(notify_sock);
+        notify_sock = -1;
+    }
+    return FALSE;
+}
+
+/**
  * @brief create and register the inbound (guard -> server) command socket
  *
  * Binds a non-blocking SO_PASSCRED datagram socket at the well-known command
@@ -1414,12 +1447,6 @@ XnotifyReport(ClientPtr client, const int action) {
     if (!XnotifyIsGuardAlive())
         return;
 
-    if (notify_sock == -1) {
-        XnotifyInit();
-        if (notify_sock == -1)
-            return;
-    }
-
     pid_t pid = GetClientPid(client);
 
     static pid_t last_report_pid = 0;
@@ -1445,12 +1472,7 @@ XnotifyReport(ClientPtr client, const int action) {
              "{\"command\":\"REPORT\",\"action\":%d,\"exe\":\"%s\",\"pid\":%d}\n",
              action, exe, pid);
 
-    ssize_t sent = send(notify_sock, msg, strlen(msg), 0);
-
-    if (sent == -1 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        close(notify_sock);
-        notify_sock = -1;
-    }
+    XnotifySendToGuard(msg, strlen(msg));
 }
 
 /**
@@ -1766,12 +1788,6 @@ Xnotify(ClientPtr client, const int action) {
     if (!XnotifyIsGuardAlive())
         return;
 
-    if (notify_sock == -1) {
-        XnotifyInit();
-        if (notify_sock == -1)
-            return;
-    }
-
     pid_t client_pid = GetClientPid(client);
     ClientExeInfo info = GetClientExeInfo(client);
     if (!info.exe) info.exe = strdup("?");
@@ -1781,17 +1797,10 @@ Xnotify(ClientPtr client, const int action) {
              "{\"action\":%d,\"exe\":\"%s\",\"args\":\"%s\",\"pid\":%d}\n",
              action, info.exe, info.args ? info.args : "", client_pid);
 
-    ssize_t len = strlen(msg);
-    ssize_t sent = send(notify_sock, msg, len, 0);
     free(info.exe);
     free(info.args);
 
-    if (sent == -1) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
-            return;
-        close(notify_sock);
-        notify_sock = -1;
-    }
+    XnotifySendToGuard(msg, strlen(msg));
 }
 
 static unsigned char XnotifyReqCode;
