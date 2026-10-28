@@ -48,6 +48,7 @@
 #include "dix/resource_priv.h"
 #include "os/bug_priv.h"
 #include "Xext/damage/damageext_priv.h"
+#include "Xext/present/present_priv.h"
 
 #include "compint.h"
 #include "compositeext_intern.h"
@@ -537,6 +538,56 @@ compGetBackgroundState(WindowPtr pWin)
     return pWin->backgroundState;
 }
 
+/*
+ * Per-CRTC page flips leave those CRTCs' part of the screen pixmap holding an
+ * old frame, not what is on screen. Paint whatever 'pPixmap' (at x,y on the
+ * screen) took from those regions of the root opaque black, so a new window
+ * never shows a stale -- possibly confidential -- frame before its first paint.
+ */
+static void
+compBlankStaleRoot(PixmapPtr pPixmap, PictFormatPtr pFormat,
+                   int x, int y, int w, int h)
+{
+    ScreenPtr pScreen = pPixmap->drawable.pScreen;
+    BoxRec box = { x, y, x + w, y + h };
+    RegionRec stale, area;
+
+    RegionNull(&stale);
+    if (present_flip_stale_root_region(pScreen, &stale)) {
+        GCPtr pGC;
+
+        RegionInit(&area, &box, 1);
+        RegionIntersect(&stale, &stale, &area);
+        RegionUninit(&area);
+
+        if (RegionNotEmpty(&stale) &&
+            (pGC = GetScratchGC(pPixmap->drawable.depth, pScreen))) {
+            ChangeGCVal val;
+            BoxPtr rects = RegionRects(&stale);
+            int i, n = RegionNumRects(&stale);
+
+            val.val = 0;
+            if (pFormat && pFormat->type == PictTypeDirect)
+                val.val = (CARD32) pFormat->direct.alphaMask << pFormat->direct.alpha;
+            ChangeGC(NULL, pGC, GCForeground, &val);
+            ValidateGC(&pPixmap->drawable, pGC);
+
+            for (i = 0; i < n; i++) {
+                xRectangle rect = {
+                    .x = rects[i].x1 - x,
+                    .y = rects[i].y1 - y,
+                    .width = rects[i].x2 - rects[i].x1,
+                    .height = rects[i].y2 - rects[i].y1,
+                };
+
+                (*pGC->ops->PolyFillRect) (&pPixmap->drawable, pGC, 1, &rect);
+            }
+            FreeScratchGC(pGC);
+        }
+    }
+    RegionUninit(&stale);
+}
+
 static PixmapPtr
 compNewPixmap(WindowPtr pWin, int x, int y, int w, int h)
 {
@@ -609,6 +660,11 @@ compNewPixmap(WindowPtr pWin, int x, int y, int w, int h)
             FreePicture(pSrcPicture, 0);
         if (pDstPicture)
             FreePicture(pDstPicture, 0);
+
+        /* Unlike the CopyArea above, a Render read of the root is not
+         * redirected to per-CRTC flip buffers. */
+        if (pParent == pScreen->root)
+            compBlankStaleRoot(pPixmap, pDstFormat, x, y, w, h);
     }
     return pPixmap;
 }
