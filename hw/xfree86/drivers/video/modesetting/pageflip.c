@@ -613,6 +613,7 @@ ms_do_pageflip_crtc(ScreenPtr screen,
     ScrnInfoPtr scrn = xf86ScreenToScrn(screen);
     modesettingPtr ms = modesettingPTR(scrn);
     struct gbm_bo *new_front_bo;
+    drmmode_bo import_bo = { 0 };
     struct ms_flipdata *flipdata;
     enum queue_flip_status flip_status;
     uint32_t new_fb_id = 0;
@@ -650,7 +651,10 @@ ms_do_pageflip_crtc(ScreenPtr screen,
     /* Import the CRTC-sized pixmap as its own framebuffer. The previous per-CRTC
      * fb this CRTC is leaving is released by queue_flip_on_crtc() bookkeeping
      * once the flip completes. */
-    if (drmmode_bo_import(&ms->drmmode, new_front_bo, &new_fb_id)) {
+    import_bo.width = new_front->drawable.width;
+    import_bo.height = new_front->drawable.height;
+    import_bo.gbm = new_front_bo;
+    if (drmmode_bo_import(&ms->drmmode, &import_bo, &new_fb_id)) {
         xf86DrvMsg(scrn->scrnIndex, X_WARNING,
                    "%s: Import BO for per-CRTC flip failed: %s\n",
                    log_prefix, strerror(errno));

@@ -351,7 +351,6 @@ ms_present_check_flip(RRCrtcPtr crtc,
     modesettingPtr ms = modesettingPTR(scrn);
     Bool async_flip = !sync_flip;
     Bool per_crtc = crtc && ms_flip_is_per_crtc(screen, pixmap);
-    int target_x = 0, target_y = 0;
 
     if (reason)
         *reason = PRESENT_FLIP_REASON_UNKNOWN;
