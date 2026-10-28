@@ -1514,6 +1514,15 @@ XnotifyIsAllowed(ClientPtr client, const int action) {
     if (!info.exe)
         return FALSE;
 
+    /* The guard is trusted with every action: it would otherwise be asked
+     * about itself, and it pauses whoever it is asked about. */
+    if (XnotifyExeIsGuard(info.exe)) {
+        XnotifyGrantPermission(client, action);
+        free(info.exe);
+        free(info.args);
+        return TRUE;
+    }
+
     XPermEntry *entry = find_matching_entry(&info);
     Bool allowed = FALSE;
     if (entry && (entry->perm_mask & bit)) {

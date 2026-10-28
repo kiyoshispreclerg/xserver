@@ -6,6 +6,7 @@
 #
 # Syntax:
 #   ALLOW XNOTIFY <exe>            — trust <exe> as the external guard daemon
+#                                    (it is also allowed every action)
 #   ALLOW ALL <exe>                — grant every action to <exe>
 #   ALLOW ALL <exe>|<arg-pattern>  — same, but only when cmdline matches pattern
 #   ALLOW <action> <exe>           — grant a single action to <exe>
