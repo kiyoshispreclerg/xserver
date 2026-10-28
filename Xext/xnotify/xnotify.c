@@ -631,7 +631,9 @@ XnotifyAllowAll(const char *exe, const char *args) {
 
     XPermEntry *entry = create_or_get_entry(exe, args);
     if (entry) {
-        entry->perm_mask = XNOTIFY_ALL_ACTIONS_MASK;
+        /* Keep XNOTIFY_GUARD: "all actions" are the client actions, and a
+         * guard resending ALLOW ALL for itself must not demote itself. */
+        entry->perm_mask |= XNOTIFY_ALL_ACTIONS_MASK;
         XnotifyRemovePending(exe, 0);
     }
 }
@@ -647,7 +649,7 @@ XnotifyDenyAll(const char *exe) {
 
     XPermEntry *entry = find_exact_entry(exe);
     if (entry) {
-        entry->perm_mask = 0;
+        entry->perm_mask &= ~XNOTIFY_ALL_ACTIONS_MASK;
     }
 }
 
