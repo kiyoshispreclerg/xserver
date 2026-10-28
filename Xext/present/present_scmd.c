@@ -602,6 +602,46 @@ present_flip_copy_area(DrawablePtr pSrc, DrawablePtr pDst, GCPtr pGC,
     return TRUE;
 }
 
+/*
+ * Add to 'region' the desktop-space rectangle of every CRTC that is currently
+ * page-flipped per CRTC. That part of the screen pixmap is not what is on
+ * screen: it still holds whatever was there when the flip began (or what the
+ * last unflip seeded), so anything that reads it as "what is under a window"
+ * would show an old frame. Unlike present_flip_overlay_valid, rotated CRTCs are
+ * included, since their part of the screen pixmap is just as stale. Returns
+ * TRUE if anything was added.
+ */
+Bool
+present_flip_stale_root_region(ScreenPtr screen, RegionPtr region)
+{
+    present_screen_priv_ptr     screen_priv;
+    present_flip_state_ptr      fs;
+    Bool                        any = FALSE;
+
+    if (!dixPrivateKeyRegistered(&present_screen_private_key))
+        return FALSE;
+    screen_priv = present_screen_priv(screen);
+    if (!screen_priv)
+        return FALSE;
+
+    xorg_list_for_each_entry(fs, &screen_priv->flip_states, link) {
+        BoxRec      box;
+        RegionRec   r;
+
+        if (!fs->flip_pixmap || !fs->crtc ||
+            !present_flip_is_per_crtc(screen, fs->flip_pixmap) ||
+            !present_crtc_box(fs->crtc, &box))
+            continue;
+
+        RegionInit(&r, &box, 1);
+        RegionUnion(region, region, &r);
+        RegionUninit(&r);
+        any = TRUE;
+    }
+
+    return any;
+}
+
 static Bool
 present_check_flip(RRCrtcPtr            crtc,
                    WindowPtr            window,
