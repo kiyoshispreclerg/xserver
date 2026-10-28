@@ -26,8 +26,7 @@
  *    Zhigang Gong <zhigang.gong@linux.intel.com>
  *
  */
-
-#include "dix-config.h"
+#include <dix-config.h>
 
 #define GLAMOR_FOR_XORG
 #include <unistd.h>
@@ -46,10 +45,11 @@
 #ifndef GBM_MAX_PLANES
 #define GBM_MAX_PLANES 4
 #endif
-#include "glamor_egl.h"
+#include "dix/screen_hooks_priv.h"
+#include "glamor/glamor_priv.h"
+#include "os/bug_priv.h"
 
-#include "glamor.h"
-#include "glamor_priv.h"
+#include "glamor_egl.h"
 #include "glamor_glx_provider.h"
 #include "dri3.h"
 
@@ -57,19 +57,12 @@ struct glamor_egl_screen_private {
     EGLDisplay display;
     EGLContext context;
     char *device_path;
-
-    CreateScreenResourcesProcPtr CreateScreenResources;
-    CloseScreenProcPtr CloseScreen;
-#ifdef EGL_MESA_image_dma_buf_export
-    int has_image_dma_buf_export;
-#endif
-    int fd;
-    struct gbm_device *gbm;
-    int dmabuf_capable;
     char *glvnd_vendor; /* GLVND vendor if forced from options or NULL otherwise */
 
-    CloseScreenProcPtr saved_close_screen;
-    DestroyPixmapProcPtr saved_destroy_pixmap;
+    struct gbm_device *gbm;
+    int fd;
+    int dmabuf_capable;
+
     xf86FreeScreenProc *saved_free_screen;
 };
 
@@ -152,22 +145,6 @@ glamor_egl_get_gbm_device(ScreenPtr screen)
     return glamor_egl->gbm;
 }
 
-Bool
-glamor_egl_create_textured_screen(ScreenPtr screen, int handle, int stride)
-{
-    ScrnInfoPtr scrn = xf86ScreenToScrn(screen);
-    PixmapPtr screen_pixmap;
-
-    screen_pixmap = screen->GetScreenPixmap(screen);
-
-    if (!glamor_egl_create_textured_pixmap(screen_pixmap, handle, stride)) {
-        xf86DrvMsg(scrn->scrnIndex, X_ERROR,
-                   "Failed to create textured screen.");
-        return FALSE;
-    }
-    return TRUE;
-}
-
 static void
 glamor_egl_set_pixmap_image(PixmapPtr pixmap, EGLImageKHR image,
                             Bool used_modifiers)
@@ -175,6 +152,8 @@ glamor_egl_set_pixmap_image(PixmapPtr pixmap, EGLImageKHR image,
     struct glamor_pixmap_private *pixmap_priv =
         glamor_get_pixmap_private(pixmap);
     EGLImageKHR old;
+
+    BUG_RETURN(!pixmap_priv);
 
     old = pixmap_priv->image;
     if (old) {
@@ -238,12 +217,106 @@ glamor_egl_create_textured_pixmap_from_gbm_bo(PixmapPtr pixmap,
     Bool ret = FALSE;
 
     glamor_egl = glamor_egl_get_screen_private(scrn);
+#ifdef GBM_BO_FD_FOR_PLANE
+    uint64_t modifier = gbm_bo_get_modifier(bo);
+    const int num_planes = gbm_bo_get_plane_count(bo);
+    int fds[GBM_MAX_PLANES];
+    int plane;
+    int attr_num = 0;
+    EGLint img_attrs[64] = {0};
+    enum PlaneAttrs {
+        PLANE_FD,
+        PLANE_OFFSET,
+        PLANE_PITCH,
+        PLANE_MODIFIER_LO,
+        PLANE_MODIFIER_HI,
+        NUM_PLANE_ATTRS
+    };
+    static const EGLint planeAttrs[][NUM_PLANE_ATTRS] = {
+        {
+            EGL_DMA_BUF_PLANE0_FD_EXT,
+            EGL_DMA_BUF_PLANE0_OFFSET_EXT,
+            EGL_DMA_BUF_PLANE0_PITCH_EXT,
+            EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT,
+            EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT,
+        },
+        {
+            EGL_DMA_BUF_PLANE1_FD_EXT,
+            EGL_DMA_BUF_PLANE1_OFFSET_EXT,
+            EGL_DMA_BUF_PLANE1_PITCH_EXT,
+            EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT,
+            EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT,
+        },
+        {
+            EGL_DMA_BUF_PLANE2_FD_EXT,
+            EGL_DMA_BUF_PLANE2_OFFSET_EXT,
+            EGL_DMA_BUF_PLANE2_PITCH_EXT,
+            EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT,
+            EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT,
+        },
+        {
+            EGL_DMA_BUF_PLANE3_FD_EXT,
+            EGL_DMA_BUF_PLANE3_OFFSET_EXT,
+            EGL_DMA_BUF_PLANE3_PITCH_EXT,
+            EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT,
+            EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT,
+        },
+    };
+
+    for (plane = 0; plane < num_planes; plane++) fds[plane] = -1;
+#endif
 
     glamor_make_current(glamor_priv);
 
-    image = eglCreateImageKHR(glamor_egl->display,
-                              EGL_NO_CONTEXT,
-                              EGL_NATIVE_PIXMAP_KHR, bo, NULL);
+#ifdef GBM_BO_FD_FOR_PLANE
+    if (glamor_egl->dmabuf_capable) {
+#define ADD_ATTR(attrs, num, attr)                                      \
+        do {                                                            \
+            assert(((num) + 1) < (sizeof(attrs) / sizeof((attrs)[0]))); \
+            (attrs)[(num)++] = (attr);                                  \
+        } while (0)
+        ADD_ATTR(img_attrs, attr_num, EGL_WIDTH);
+        ADD_ATTR(img_attrs, attr_num, gbm_bo_get_width(bo));
+        ADD_ATTR(img_attrs, attr_num, EGL_HEIGHT);
+        ADD_ATTR(img_attrs, attr_num, gbm_bo_get_height(bo));
+        ADD_ATTR(img_attrs, attr_num, EGL_LINUX_DRM_FOURCC_EXT);
+        ADD_ATTR(img_attrs, attr_num, gbm_bo_get_format(bo));
+
+        for (plane = 0; plane < num_planes; plane++) {
+            fds[plane] = gbm_bo_get_fd_for_plane(bo, plane);
+            ADD_ATTR(img_attrs, attr_num, planeAttrs[plane][PLANE_FD]);
+            ADD_ATTR(img_attrs, attr_num, fds[plane]);
+            ADD_ATTR(img_attrs, attr_num, planeAttrs[plane][PLANE_OFFSET]);
+            ADD_ATTR(img_attrs, attr_num, gbm_bo_get_offset(bo, plane));
+            ADD_ATTR(img_attrs, attr_num, planeAttrs[plane][PLANE_PITCH]);
+            ADD_ATTR(img_attrs, attr_num, gbm_bo_get_stride_for_plane(bo, plane));
+            ADD_ATTR(img_attrs, attr_num, planeAttrs[plane][PLANE_MODIFIER_LO]);
+            ADD_ATTR(img_attrs, attr_num, (uint32_t)(modifier & 0xFFFFFFFFULL));
+            ADD_ATTR(img_attrs, attr_num, planeAttrs[plane][PLANE_MODIFIER_HI]);
+            ADD_ATTR(img_attrs, attr_num, (uint32_t)(modifier >> 32ULL));
+        }
+        ADD_ATTR(img_attrs, attr_num, EGL_NONE);
+#undef ADD_ATTR
+
+        image = eglCreateImageKHR(glamor_egl->display,
+                                  EGL_NO_CONTEXT,
+                                  EGL_LINUX_DMA_BUF_EXT,
+                                  NULL,
+                                  img_attrs);
+
+        for (plane = 0; plane < num_planes; plane++) {
+            close(fds[plane]);
+            fds[plane] = -1;
+        }
+    }
+    else
+#endif
+    {
+        image = eglCreateImageKHR(glamor_egl->display,
+                                  EGL_NO_CONTEXT,
+                                  EGL_NATIVE_PIXMAP_KHR, bo, NULL);
+    }
+
     if (image == EGL_NO_IMAGE_KHR) {
         glamor_set_pixmap_type(pixmap, GLAMOR_DRM_ONLY);
         goto done;
@@ -285,6 +358,8 @@ glamor_make_pixmap_exportable(PixmapPtr pixmap, Bool modifiers_ok)
     PixmapPtr exported;
     GCPtr scratch_gc;
 
+    BUG_RETURN_VAL(!pixmap_priv, FALSE);
+
     if (pixmap_priv->image &&
         (modifiers_ok || !pixmap_priv->used_modifiers))
         return TRUE;
@@ -320,8 +395,30 @@ glamor_make_pixmap_exportable(PixmapPtr pixmap, Bool modifiers_ok)
 
         glamor_get_modifiers(screen, format, &num_modifiers, &modifiers);
 
-        bo = gbm_bo_create_with_modifiers(glamor_egl->gbm, width, height,
-                                          format, modifiers, num_modifiers);
+        if (num_modifiers > 0) {
+#ifdef GBM_BO_WITH_MODIFIERS2
+            /* TODO: Is scanout ever used? If so, where? */
+            bo = gbm_bo_create_with_modifiers2(glamor_egl->gbm, width, height,
+                                               format, modifiers, num_modifiers,
+                                               GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT);
+            if (!bo) {
+                /* something failed, try again without GBM_BO_USE_SCANOUT */
+                /* maybe scanout does work, but modifiers aren't supported */
+                /* we handle this case on the fallback path */
+                bo = gbm_bo_create_with_modifiers2(glamor_egl->gbm, width, height,
+                                                   format, modifiers, num_modifiers,
+                                                   GBM_BO_USE_RENDERING);
+#if 0
+                if (bo) {
+                    /* TODO: scanout failed, but regular buffer succeeded, maybe log something? */
+                }
+#endif
+            }
+#else
+            bo = gbm_bo_create_with_modifiers(glamor_egl->gbm, width, height,
+                                              format, modifiers, num_modifiers);
+#endif
+        }
         if (bo)
             used_modifiers = TRUE;
         free(modifiers);
@@ -330,12 +427,27 @@ glamor_make_pixmap_exportable(PixmapPtr pixmap, Bool modifiers_ok)
 
     if (!bo)
     {
+        /* TODO: Is scanout ever used? If so, where? */
         bo = gbm_bo_create(glamor_egl->gbm, width, height, format,
 #ifdef GLAMOR_HAS_GBM_LINEAR
                 (pixmap->usage_hint == CREATE_PIXMAP_USAGE_SHARED ?
                  GBM_BO_USE_LINEAR : 0) |
 #endif
                 GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT);
+        if (!bo) {
+            /* something failed, try again without GBM_BO_USE_SCANOUT */
+            bo = gbm_bo_create(glamor_egl->gbm, width, height, format,
+#ifdef GLAMOR_HAS_GBM_LINEAR
+                    (pixmap->usage_hint == CREATE_PIXMAP_USAGE_SHARED ?
+                     GBM_BO_USE_LINEAR : 0) |
+                     GBM_BO_USE_RENDERING);
+#endif
+#if 0
+            if (bo) {
+                /* TODO: scanout failed, but regular buffer succeeded, maybe log something? */
+            }
+#endif
+        }
     }
 
     if (!bo) {
@@ -353,7 +465,7 @@ glamor_make_pixmap_exportable(PixmapPtr pixmap, Bool modifiers_ok)
         xf86DrvMsg(scrn->scrnIndex, X_ERROR,
                    "Failed to make %dx%dx%dbpp pixmap from GBM bo\n",
                    width, height, pixmap->drawable.bitsPerPixel);
-        screen->DestroyPixmap(exported);
+        dixDestroyPixmap(exported, 0);
         gbm_bo_destroy(bo);
         return FALSE;
     }
@@ -374,7 +486,7 @@ glamor_make_pixmap_exportable(PixmapPtr pixmap, Bool modifiers_ok)
     /* Swap the devKind into the original pixmap, reflecting the bo's stride */
     screen->ModifyPixmapHeader(pixmap, 0, 0, 0, 0, exported->devKind, NULL);
 
-    screen->DestroyPixmap(exported);
+    dixDestroyPixmap(exported, 0);
 
     return TRUE;
 }
@@ -386,58 +498,14 @@ glamor_gbm_bo_from_pixmap_internal(ScreenPtr screen, PixmapPtr pixmap)
         glamor_egl_get_screen_private(xf86ScreenToScrn(screen));
     struct glamor_pixmap_private *pixmap_priv =
         glamor_get_pixmap_private(pixmap);
-    struct gbm_bo* ret = NULL;
-#ifdef EGL_MESA_image_dma_buf_export
-    int fourcc = 0;
-    int num_planes = 0;
-    struct gbm_import_fd_modifier_data fd_modifier_data;
-    EGLuint64KHR modifiers[GBM_MAX_PLANES] = {0};
-#endif
+
+    BUG_RETURN_VAL(!pixmap_priv, NULL);
 
     if (!pixmap_priv->image)
         return NULL;
 
-    ret = gbm_bo_import(glamor_egl->gbm, GBM_BO_IMPORT_EGL_IMAGE,
-                        pixmap_priv->image, 0);
-
-#ifdef EGL_MESA_image_dma_buf_export
-    if (ret || !glamor_egl->has_image_dma_buf_export) {
-        return ret;
-    }
-
-#ifndef GBM_MAX_PLANES
-#define GBM_MAX_PLANES 4
-#endif
-
-    if (!eglExportDMABUFImageQueryMESA(glamor_egl->display, pixmap_priv->image, &fourcc, &num_planes, modifiers) || (num_planes > GBM_MAX_PLANES)) {
-        return NULL;
-    }
-
-    fd_modifier_data = (struct gbm_import_fd_modifier_data) {
-        .width = pixmap->drawable.width,
-        .height = pixmap->drawable.height,
-        .format = fourcc, /* GBM and DRM formats are the same */
-        .num_fds = num_planes,
-        .modifier = modifiers[0],
-        .fds = {-1, -1, -1, -1},
-        .strides = {0},
-        .offsets = {0},
-    };
-
-    if (eglExportDMABUFImageMESA(glamor_egl->display, pixmap_priv->image,
-                                 fd_modifier_data.fds,
-                                 fd_modifier_data.strides,
-                                 fd_modifier_data.offsets)) {
-        ret = gbm_bo_import(glamor_egl->gbm, GBM_BO_IMPORT_FD_MODIFIER,
-                            &fd_modifier_data, 0);
-    }
-    for (int i = 0; i < num_planes; i++) {
-        if (fd_modifier_data.fds[i] >= 0) {
-            close(fd_modifier_data.fds[i]);
-        }
-    }
-#endif
-    return ret;
+    return gbm_bo_import(glamor_egl->gbm, GBM_BO_IMPORT_EGL_IMAGE,
+                         pixmap_priv->image, GBM_BO_USE_RENDERING);
 }
 
 struct gbm_bo *
@@ -454,7 +522,7 @@ glamor_egl_fds_from_pixmap(ScreenPtr screen, PixmapPtr pixmap, int *fds,
                            uint32_t *strides, uint32_t *offsets,
                            uint64_t *modifier)
 {
-#ifdef HAVE_GBM
+#ifdef GLAMOR_HAS_GBM
     struct gbm_bo *bo;
     int num_fds;
 #ifdef GBM_BO_WITH_MODIFIERS
@@ -522,7 +590,7 @@ int
 glamor_egl_fd_from_pixmap(ScreenPtr screen, PixmapPtr pixmap,
                           CARD16 *stride, CARD32 *size)
 {
-#ifdef HAVE_GBM
+#ifdef GLAMOR_HAS_GBM
     struct gbm_bo *bo;
     int fd;
 
@@ -622,7 +690,8 @@ glamor_back_pixmap_from_fd(PixmapPtr pixmap,
     import_data.width = width;
     import_data.height = height;
     import_data.stride = stride;
-    bo = gbm_bo_import(glamor_egl->gbm, GBM_BO_IMPORT_FD, &import_data, 0);
+    bo = gbm_bo_import(glamor_egl->gbm, GBM_BO_IMPORT_FD, &import_data,
+                       GBM_BO_USE_RENDERING);
     if (!bo)
         return FALSE;
 
@@ -668,7 +737,8 @@ glamor_pixmap_from_fds(ScreenPtr screen,
             import_data.strides[i] = strides[i];
             import_data.offsets[i] = offsets[i];
         }
-        bo = gbm_bo_import(glamor_egl->gbm, GBM_BO_IMPORT_FD_MODIFIER, &import_data, 0);
+        bo = gbm_bo_import(glamor_egl->gbm, GBM_BO_IMPORT_FD_MODIFIER, &import_data,
+                           GBM_BO_USE_RENDERING);
         if (bo) {
             screen->ModifyPixmapHeader(pixmap, width, height, 0, 0, strides[0], NULL);
             ret = glamor_egl_create_textured_pixmap_from_gbm_bo(pixmap, bo, TRUE);
@@ -685,7 +755,7 @@ glamor_pixmap_from_fds(ScreenPtr screen,
 
 error:
     if (ret == FALSE) {
-        screen->DestroyPixmap(pixmap);
+        dixDestroyPixmap(pixmap, 0);
         return NULL;
     }
     return pixmap;
@@ -707,7 +777,7 @@ glamor_pixmap_from_fd(ScreenPtr screen,
                                      stride, depth, bpp);
 
     if (ret == FALSE) {
-        screen->DestroyPixmap(pixmap);
+        dixDestroyPixmap(pixmap, 0);
         return NULL;
     }
     return pixmap;
@@ -720,10 +790,12 @@ glamor_get_formats(ScreenPtr screen,
 #ifdef GLAMOR_HAS_EGL_QUERY_DMABUF
     struct glamor_egl_screen_private *glamor_egl;
     EGLint num;
+#endif
 
-    /* Explicitly zero the count as the caller may ignore the return value */
+    /* Explicitly zero the count and formats as the caller may ignore the return value */
     *num_formats = 0;
-
+    *formats = NULL;
+#ifdef GLAMOR_HAS_EGL_QUERY_DMABUF
     glamor_egl = glamor_egl_get_screen_private(xf86ScreenToScrn(screen));
 
     if (!glamor_egl->dmabuf_capable)
@@ -742,15 +814,13 @@ glamor_get_formats(ScreenPtr screen,
     if (!eglQueryDmaBufFormatsEXT(glamor_egl->display, num,
                                   (EGLint *) *formats, &num)) {
         free(*formats);
+        *formats = NULL;
         return FALSE;
     }
 
     *num_formats = num;
-    return TRUE;
-#else
-    *num_formats = 0;
-    return TRUE;
 #endif
+    return TRUE;
 }
 
 Bool
@@ -760,10 +830,12 @@ glamor_get_modifiers(ScreenPtr screen, uint32_t format,
 #ifdef GLAMOR_HAS_EGL_QUERY_DMABUF
     struct glamor_egl_screen_private *glamor_egl;
     EGLint num;
+#endif
 
-    /* Explicitly zero the count as the caller may ignore the return value */
+    /* Explicitly zero the count and modifiers as the caller may ignore the return value */
     *num_modifiers = 0;
-
+    *modifiers = NULL;
+#ifdef GLAMOR_HAS_EGL_QUERY_DMABUF
     glamor_egl = glamor_egl_get_screen_private(xf86ScreenToScrn(screen));
 
     if (!glamor_egl->dmabuf_capable)
@@ -788,11 +860,8 @@ glamor_get_modifiers(ScreenPtr screen, uint32_t format,
     }
 
     *num_modifiers = num;
-    return TRUE;
-#else
-    *num_modifiers = 0;
-    return TRUE;
 #endif
+    return TRUE;
 }
 
 const char *
@@ -810,30 +879,20 @@ glamor_egl_get_driver_name(ScreenPtr screen)
     return NULL;
 }
 
-
-static Bool
-glamor_egl_destroy_pixmap(PixmapPtr pixmap)
+static void glamor_egl_pixmap_destroy(CallbackListPtr *pcbl, ScreenPtr pScreen, PixmapPtr pixmap)
 {
     ScreenPtr screen = pixmap->drawable.pScreen;
     ScrnInfoPtr scrn = xf86ScreenToScrn(screen);
     struct glamor_egl_screen_private *glamor_egl =
         glamor_egl_get_screen_private(scrn);
-    Bool ret;
 
-    if (pixmap->refcnt == 1) {
-        struct glamor_pixmap_private *pixmap_priv =
-            glamor_get_pixmap_private(pixmap);
+    struct glamor_pixmap_private *pixmap_priv =
+        glamor_get_pixmap_private(pixmap);
 
-        if (pixmap_priv->image)
-            eglDestroyImageKHR(glamor_egl->display, pixmap_priv->image);
-    }
+    BUG_RETURN(!pixmap_priv);
 
-    screen->DestroyPixmap = glamor_egl->saved_destroy_pixmap;
-    ret = screen->DestroyPixmap(pixmap);
-    glamor_egl->saved_destroy_pixmap = screen->DestroyPixmap;
-    screen->DestroyPixmap = glamor_egl_destroy_pixmap;
-
-    return ret;
+    if (pixmap_priv->image)
+        eglDestroyImageKHR(glamor_egl->display, pixmap_priv->image);
 }
 
 void
@@ -850,8 +909,10 @@ glamor_egl_exchange_buffers(PixmapPtr front, PixmapPtr back)
 
     temp_img = back_priv->image;
     temp_mod = back_priv->used_modifiers;
+    BUG_RETURN(!back_priv);
     back_priv->image = front_priv->image;
     back_priv->used_modifiers = front_priv->used_modifiers;
+    BUG_RETURN(!front_priv);
     front_priv->image = temp_img;
     front_priv->used_modifiers = temp_mod;
 
@@ -859,8 +920,7 @@ glamor_egl_exchange_buffers(PixmapPtr front, PixmapPtr back)
     glamor_set_pixmap_type(back, GLAMOR_TEXTURE_DRM);
 }
 
-static Bool
-glamor_egl_close_screen(ScreenPtr screen)
+static void glamor_egl_close_screen(CallbackListPtr *pcbl, ScreenPtr screen, void *unused)
 {
     ScrnInfoPtr scrn;
     struct glamor_egl_screen_private *glamor_egl;
@@ -870,14 +930,15 @@ glamor_egl_close_screen(ScreenPtr screen)
     scrn = xf86ScreenToScrn(screen);
     glamor_egl = glamor_egl_get_screen_private(scrn);
     screen_pixmap = screen->GetScreenPixmap(screen);
+
     pixmap_priv = glamor_get_pixmap_private(screen_pixmap);
+    BUG_RETURN(!pixmap_priv);
 
     eglDestroyImageKHR(glamor_egl->display, pixmap_priv->image);
     pixmap_priv->image = NULL;
 
-    screen->CloseScreen = glamor_egl->saved_close_screen;
-
-    return screen->CloseScreen(screen);
+    dixScreenUnhookClose(screen, glamor_egl_close_screen);
+    dixScreenUnhookPixmapDestroy(screen, glamor_egl_pixmap_destroy);
 }
 
 #ifdef DRI3
@@ -957,11 +1018,8 @@ glamor_egl_screen_init(ScreenPtr screen, struct glamor_context *glamor_ctx)
 #endif
     const char *gbm_backend_name;
 
-    glamor_egl->saved_close_screen = screen->CloseScreen;
-    screen->CloseScreen = glamor_egl_close_screen;
-
-    glamor_egl->saved_destroy_pixmap = screen->DestroyPixmap;
-    screen->DestroyPixmap = glamor_egl_destroy_pixmap;
+    dixScreenHookClose(screen, glamor_egl_close_screen);
+    dixScreenHookPixmapDestroy(screen, glamor_egl_pixmap_destroy);
 
     glamor_ctx->ctx = glamor_egl->context;
     glamor_ctx->display = glamor_egl->display;
@@ -1005,7 +1063,6 @@ glamor_egl_screen_init(ScreenPtr screen, struct glamor_context *glamor_ctx)
 #ifdef GLXEXT
     if (!vendor_initialized) {
         GlxPushProvider(&glamor_provider);
-        xorgGlxCreateVendor();
         vendor_initialized = TRUE;
     }
 #endif
@@ -1101,7 +1158,7 @@ glamor_egl_try_gles_api(ScrnInfoPtr scrn)
 {
     struct glamor_egl_screen_private *glamor_egl =
         glamor_egl_get_screen_private(scrn);
-
+        
     static const EGLint config_attribs[] = {
         EGL_CONTEXT_CLIENT_VERSION, 2,
         EGL_NONE
@@ -1163,9 +1220,12 @@ glamor_egl_init(ScrnInfoPtr scrn, int fd)
     memcpy(options, GlamorEGLOptions, sizeof(GlamorEGLOptions));
     xf86ProcessOptions(scrn->scrnIndex, scrn->options, options);
     glvnd_vendor = xf86GetOptValString(options, GLAMOREGLOPT_VENDOR_LIBRARY);
-    if (glvnd_vendor)
-        glamor_egl->glvnd_vendor = XNFstrdup(glvnd_vendor);
-
+    if (glvnd_vendor) {
+        glamor_egl->glvnd_vendor = strdup(glvnd_vendor);
+        if (!glamor_egl->glvnd_vendor) {
+            xf86DrvMsg(scrn->scrnIndex, X_WARNING, "Couldn't set gl vendor to: %s\n", glvnd_vendor);
+        }
+    }
     api = xf86GetOptValString(options, GLAMOREGLOPT_RENDERING_API);
     if (api && !strncasecmp(api, "es", 2))
         force_es = TRUE;
@@ -1193,10 +1253,6 @@ glamor_egl_init(ScrnInfoPtr scrn, int fd)
         glamor_egl->display = EGL_NO_DISPLAY;
         goto error;
     }
-
-#ifdef EGL_MESA_image_dma_buf_export
-    glamor_egl->has_image_dma_buf_export = epoxy_has_egl_extension(glamor_egl->display, "EGL_MESA_image_dma_buf_export");
-#endif
 
 #define GLAMOR_CHECK_EGL_EXTENSION(EXT)  \
 	if (!epoxy_has_egl_extension(glamor_egl->display, "EGL_" #EXT)) {  \
@@ -1279,7 +1335,7 @@ glamor_egl_init(ScrnInfoPtr scrn, int fd)
             glamor_egl->dmabuf_capable = TRUE;
         else if (strstr((const char *)renderer, "zink"))
             glamor_egl->dmabuf_capable = TRUE;
-        else if (strstr((const char *)renderer, "radeonsi"))
+        else if (strstr((const char *)renderer, "NVIDIA"))
             glamor_egl->dmabuf_capable = TRUE;
         else
             glamor_egl->dmabuf_capable = FALSE;
