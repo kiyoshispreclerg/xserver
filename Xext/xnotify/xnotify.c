@@ -902,9 +902,6 @@ static CARD32 XnotifyGuardLivenessTimer(OsTimerPtr timer, CARD32 now, void *arg)
  */
 static void
 XnotifyGuardHeartbeat(pid_t pid) {
-    if (!security_mode)
-        return;
-
     last_guard_heartbeat = GetTimeInMillis();
     if (!guard_active) {
         guard_active = TRUE;
@@ -1055,40 +1052,49 @@ XnotifyExeIsGuard(const char *exe) {
  * @param peer_pid  sender pid from SCM_CREDENTIALS
  * @return TRUE if the sender is an authorized guard
  */
-static Bool
-is_trusted_sender(Bool have_cred, uid_t peer_uid, pid_t peer_pid) {
-    if (!security_mode)
-        return FALSE;
+typedef enum {
+    SENDER_UNTRUSTED = 0,
+    SENDER_SAME_USER,   /**< legacy mode: may heartbeat/reload/query only */
+    SENDER_GUARD,       /**< security mode: holds XNOTIFY_GUARD */
+} XnotifySenderTrust;
 
+static XnotifySenderTrust
+is_trusted_sender(Bool have_cred, uid_t peer_uid, pid_t peer_pid) {
 #ifdef __linux__
     if (!have_cred) {
         ErrorF("Xnotify: rejecting message without peer credentials\n");
-        return FALSE;
+        return SENDER_UNTRUSTED;
     }
     uid_t server_uid = geteuid();
     if (peer_uid != server_uid && peer_uid != 0) {
         ErrorF("Xnotify: rejecting message from uid %u (expected %u or root)\n",
                (unsigned)peer_uid, (unsigned)server_uid);
-        return FALSE;
+        return SENDER_UNTRUSTED;
     }
 #else
     (void)have_cred;
     (void)peer_uid;
 #endif
 
+    /* Without system rules nothing is enforced, so there is nothing to
+     * guard: the sender may only keep itself alive (to receive REPORTs),
+     * ask for STATUS/CONFIG_PATH and RELOAD the root-owned rule files. */
+    if (!security_mode)
+        return SENDER_SAME_USER;
+
     char exe[EXE_PATH_MAX];
     if (!XnotifyResolveExeStrict(peer_pid, exe, sizeof(exe))) {
         ErrorF("Xnotify: rejecting message - cannot resolve sender exe (pid %d)\n",
                (int)peer_pid);
-        return FALSE;
+        return SENDER_UNTRUSTED;
     }
 
     if (!XnotifyExeIsGuard(exe)) {
         ErrorF("Xnotify: rejecting message - %s is not an authorized guard\n", exe);
-        return FALSE;
+        return SENDER_UNTRUSTED;
     }
 
-    return TRUE;
+    return SENDER_GUARD;
 }
 
 /**
@@ -1485,8 +1491,11 @@ XnotifyIsAllowed(ClientPtr client, const int action) {
     if (!xnotify_enabled)
         return TRUE;
 
-    if (!XnotifyIsGuardAlive() && !security_mode)
+    /* No system rules: permissive, the guard (if any) only gets REPORTs. */
+    if (!security_mode) {
+        XnotifyReport(client, action);
         return TRUE;
+    }
 
     uint32_t bit = (1U << (action - 1));
 
@@ -1573,7 +1582,8 @@ XnotifyPoll(void) {
         }
         buf[n] = '\0';
 
-        if (!is_trusted_sender(have_cred, peer_uid, peer_pid))
+        XnotifySenderTrust trust = is_trusted_sender(have_cred, peer_uid, peer_pid);
+        if (trust == SENDER_UNTRUSTED)
             continue;
 
         if (strstr(buf, "\"command\":\"XNOTIFY\"")) {
@@ -1587,7 +1597,7 @@ XnotifyPoll(void) {
             continue;
         }
 
-        if (strstr(buf, "\"command\":\"DISABLE\"")) {
+        if (strstr(buf, "\"command\":\"DISABLE\"") && trust == SENDER_GUARD) {
             /* Count the sender as the live guard so the watchdog is armed and
              * the disable is bounded by its lifetime. */
             XnotifyGuardHeartbeat(peer_pid);
@@ -1598,7 +1608,7 @@ XnotifyPoll(void) {
             XnotifySendStatus();
             continue;
         }
-        if (strstr(buf, "\"command\":\"ENABLE\"")) {
+        if (strstr(buf, "\"command\":\"ENABLE\"") && trust == SENDER_GUARD) {
             if (!xnotify_enabled) {
                 xnotify_enabled = TRUE;
                 XnotifyInvalidateAllClientCaches();
@@ -1625,6 +1635,11 @@ XnotifyPoll(void) {
             XnotifySendConfigPath();
             continue;
         }
+
+        /* Everything below changes what clients may do; in legacy mode
+         * there are no rules to change. */
+        if (trust != SENDER_GUARD)
+            continue;
 
         Bool has_arg = FALSE;
 
