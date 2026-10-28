@@ -1568,6 +1568,7 @@ XnotifyPoll(void) {
     }
 
     static Bool permissions_changed = FALSE;
+    Bool heard_guard = FALSE;
     char buf[512];
 
     while (poll(&pfd, 1, 0) > 0) {
@@ -1585,6 +1586,7 @@ XnotifyPoll(void) {
         XnotifySenderTrust trust = is_trusted_sender(have_cred, peer_uid, peer_pid);
         if (trust == SENDER_UNTRUSTED)
             continue;
+        heard_guard = TRUE;
 
         if (strstr(buf, "\"command\":\"XNOTIFY\"")) {
             pid_t pid = 0;
@@ -1770,7 +1772,8 @@ XnotifyPoll(void) {
         permissions_changed = FALSE;
     }
 
-    XnotifyGuardHeartbeat(0);
+    if (heard_guard)
+        XnotifyGuardHeartbeat(0);
 }
 
 /**
