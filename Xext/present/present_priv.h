@@ -504,6 +504,12 @@ present_flip_copy_area(DrawablePtr pSrc, DrawablePtr pDst, GCPtr pGC,
                        int srcx, int srcy, int w, int h, int dstx, int dsty,
                        RegionPtr *exposed);
 
+/* Add to 'region' the CRTC rectangles whose part of the screen pixmap is stale
+ * because they are page-flipped per CRTC. Returns TRUE if anything was added.
+ * Safe to call on any screen, with or without Present. */
+Bool
+present_flip_stale_root_region(ScreenPtr screen, RegionPtr region);
+
 void
 present_set_abort_flip(ScreenPtr screen, present_flip_state_ptr fs);
 
