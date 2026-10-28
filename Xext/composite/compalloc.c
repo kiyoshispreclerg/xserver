@@ -539,53 +539,36 @@ compGetBackgroundState(WindowPtr pWin)
 }
 
 /*
- * Per-CRTC page flips leave those CRTCs' part of the screen pixmap holding an
- * old frame, not what is on screen. Paint whatever 'pPixmap' (at x,y on the
- * screen) took from those regions of the root opaque black, so a new window
- * never shows a stale -- possibly confidential -- frame before its first paint.
+ * Paint 'region' (in pixmap coordinates) of 'pPixmap' opaque black.
  */
 static void
-compBlankStaleRoot(PixmapPtr pPixmap, PictFormatPtr pFormat,
-                   int x, int y, int w, int h)
+compFillBlack(PixmapPtr pPixmap, PictFormatPtr pFormat, RegionPtr region)
 {
-    ScreenPtr pScreen = pPixmap->drawable.pScreen;
-    BoxRec box = { x, y, x + w, y + h };
-    RegionRec stale, area;
+    GCPtr pGC = GetScratchGC(pPixmap->drawable.depth, pPixmap->drawable.pScreen);
+    BoxPtr rects = RegionRects(region);
+    int i, n = RegionNumRects(region);
+    ChangeGCVal val;
 
-    RegionNull(&stale);
-    if (present_flip_stale_root_region(pScreen, &stale)) {
-        GCPtr pGC;
+    if (!pGC)
+        return;
 
-        RegionInit(&area, &box, 1);
-        RegionIntersect(&stale, &stale, &area);
-        RegionUninit(&area);
+    val.val = 0;
+    if (pFormat && pFormat->type == PictTypeDirect)
+        val.val = (CARD32) pFormat->direct.alphaMask << pFormat->direct.alpha;
+    ChangeGC(NULL, pGC, GCForeground, &val);
+    ValidateGC(&pPixmap->drawable, pGC);
 
-        if (RegionNotEmpty(&stale) &&
-            (pGC = GetScratchGC(pPixmap->drawable.depth, pScreen))) {
-            ChangeGCVal val;
-            BoxPtr rects = RegionRects(&stale);
-            int i, n = RegionNumRects(&stale);
+    for (i = 0; i < n; i++) {
+        xRectangle rect = {
+            .x = rects[i].x1,
+            .y = rects[i].y1,
+            .width = rects[i].x2 - rects[i].x1,
+            .height = rects[i].y2 - rects[i].y1,
+        };
 
-            val.val = 0;
-            if (pFormat && pFormat->type == PictTypeDirect)
-                val.val = (CARD32) pFormat->direct.alphaMask << pFormat->direct.alpha;
-            ChangeGC(NULL, pGC, GCForeground, &val);
-            ValidateGC(&pPixmap->drawable, pGC);
-
-            for (i = 0; i < n; i++) {
-                xRectangle rect = {
-                    .x = rects[i].x1 - x,
-                    .y = rects[i].y1 - y,
-                    .width = rects[i].x2 - rects[i].x1,
-                    .height = rects[i].y2 - rects[i].y1,
-                };
-
-                (*pGC->ops->PolyFillRect) (&pPixmap->drawable, pGC, 1, &rect);
-            }
-            FreeScratchGC(pGC);
-        }
+        (*pGC->ops->PolyFillRect) (&pPixmap->drawable, pGC, 1, &rect);
     }
-    RegionUninit(&stale);
+    FreeScratchGC(pGC);
 }
 
 static PixmapPtr
@@ -633,38 +616,60 @@ compNewPixmap(WindowPtr pWin, int x, int y, int w, int h)
         PictFormatPtr pSrcFormat = PictureWindowFormat(pParent);
         PictFormatPtr pDstFormat = PictureWindowFormat(pWin);
         XID inferiors = IncludeInferiors;
+        BoxRec box = { 0, 0, w, h };
+        RegionRec stale, copy;
         int error;
 
-        PicturePtr pSrcPicture = CreatePicture(None,
-                                               &pParent->drawable,
-                                               pSrcFormat,
-                                               CPSubwindowMode,
-                                               &inferiors,
-                                               serverClient, &error);
-
-        PicturePtr pDstPicture = CreatePicture(None,
-                                               &pPixmap->drawable,
-                                               pDstFormat,
-                                               0, 0,
-                                               serverClient, &error);
-
-        if (pSrcPicture && pDstPicture) {
-            CompositePicture(PictOpSrc,
-                             pSrcPicture,
-                             NULL,
-                             pDstPicture,
-                             x - pParent->drawable.x,
-                             y - pParent->drawable.y, 0, 0, 0, 0, w, h);
+        /*
+         * Unlike the CopyArea above, a Render read of the root is not
+         * redirected to per-CRTC flip buffers, so where a CRTC is flipped per
+         * CRTC it would copy an old -- possibly confidential -- frame from the
+         * screen pixmap. Paint those parts black instead of reading them.
+         */
+        RegionNull(&stale);
+        RegionInit(&copy, &box, 1);
+        if (pParent == pScreen->root &&
+            present_flip_stale_root_region(pScreen, &stale)) {
+            RegionTranslate(&stale, -x, -y);
+            RegionIntersect(&stale, &stale, &copy);
+            RegionSubtract(&copy, &copy, &stale);
         }
-        if (pSrcPicture)
-            FreePicture(pSrcPicture, 0);
-        if (pDstPicture)
-            FreePicture(pDstPicture, 0);
 
-        /* Unlike the CopyArea above, a Render read of the root is not
-         * redirected to per-CRTC flip buffers. */
-        if (pParent == pScreen->root)
-            compBlankStaleRoot(pPixmap, pDstFormat, x, y, w, h);
+        if (RegionNotEmpty(&copy)) {
+            PicturePtr pSrcPicture = CreatePicture(None,
+                                                   &pParent->drawable,
+                                                   pSrcFormat,
+                                                   CPSubwindowMode,
+                                                   &inferiors,
+                                                   serverClient, &error);
+
+            PicturePtr pDstPicture = CreatePicture(None,
+                                                   &pPixmap->drawable,
+                                                   pDstFormat,
+                                                   0, 0,
+                                                   serverClient, &error);
+
+            if (pSrcPicture && pDstPicture &&
+                (!RegionNotEmpty(&stale) ||
+                 SetPictureClipRegion(pDstPicture, 0, 0, &copy) == Success)) {
+                CompositePicture(PictOpSrc,
+                                 pSrcPicture,
+                                 NULL,
+                                 pDstPicture,
+                                 x - pParent->drawable.x,
+                                 y - pParent->drawable.y, 0, 0, 0, 0, w, h);
+            }
+            if (pSrcPicture)
+                FreePicture(pSrcPicture, 0);
+            if (pDstPicture)
+                FreePicture(pDstPicture, 0);
+        }
+
+        if (RegionNotEmpty(&stale))
+            compFillBlack(pPixmap, pDstFormat, &stale);
+
+        RegionUninit(&copy);
+        RegionUninit(&stale);
     }
     return pPixmap;
 }
