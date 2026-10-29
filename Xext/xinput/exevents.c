@@ -1911,8 +1911,12 @@ ProcessDeviceEvent(InternalEvent *ev, DeviceIntPtr device)
             return;
         if (!grab && CheckDeviceGrabs(device, ev, 0))
             return;
+        if (grab && CheckPreemptingGrabs(device, ev))
+            return;
         break;
     case ET_KeyRelease:
+        if (CheckPreemptedKeyRelease(device, ev))
+            return;
         if (grab && device->deviceGrab.fromPassiveGrab &&
             (key == device->deviceGrab.activatingKey) &&
             GrabIsKeyboardGrab(device->deviceGrab.grab))

@@ -4364,7 +4364,8 @@ GrabIsPopupMenuGrab(GrabPtr grab)
  * GRAB_OVERRIDE included, and that must not make the menus of trusted desktop
  * apps immune to hotkeys. Any other grab held by a client with GRAB_OVERRIDE
  * (e.g. a screen locker) is never displaced, and is otherwise taken over only
- * by a client granted GRAB_OVERRIDE.
+ * by a client granted GRAB_OVERRIDE. With @client NULL (the server acting for
+ * a passive hotkey grab) only popup menu grabs yield.
  */
 static Bool
 GrabMayBeTakenOver(GrabPtr grab, ClientPtr client)
@@ -4434,6 +4435,96 @@ BreakPairedPointerGrab(DeviceIntPtr keybd, ClientPtr holder)
         DeactivatePointerGrabWithMode(mouse, NotifyGrab);
     else
         (*mouse->deviceGrab.DeactivateGrab) (mouse);
+}
+
+/**
+ * The passive hotkey grab each master keyboard delivered a KeyPress to
+ * behind a popup menu's grab, so its KeyRelease goes the same way. A copy, as
+ * the client may remove the passive grab before the key is released.
+ */
+static GrabPtr preemptedKeyGrab[MAXDEVICES];
+static int preemptedKey[MAXDEVICES];
+
+static void
+ForgetPreemptedKey(DeviceIntPtr device)
+{
+    FreeGrab(preemptedKeyGrab[device->id]);
+    preemptedKeyGrab[device->id] = NULL;
+    preemptedKey[device->id] = 0;
+}
+
+/**
+ * Let a global hotkey work behind a popup menu's keyboard grab.
+ *
+ * While a client holds an active keyboard grab, KeyPress events never reach
+ * CheckDeviceGrabs, so passive key grabs on the root window (global hotkeys,
+ * the lock shortcut) are dead for as long as a menu is open. If the active
+ * grab may be taken over (see GrabMayBeTakenOver), check the root window's
+ * passive grabs of other clients and, on a match, deliver the event to that
+ * grab's client without activating it: the menu keeps its grabs and stays
+ * open, e.g. to be in a screenshot. What the hotkey starts can still close it
+ * by grabbing the keyboard or pointer itself, as a screen locker does (see
+ * GrabDevice).
+ *
+ * @return TRUE if the event was delivered to a hotkey's client.
+ */
+Bool
+CheckPreemptingGrabs(DeviceIntPtr device, InternalEvent *ievent)
+{
+    GrabInfoPtr grabinfo = &device->deviceGrab;
+    GrabPtr active = grabinfo->grab;
+    DeviceEvent *event = &ievent->device_event;
+    SpritePtr sprite = device->spriteInfo->sprite;
+    BOOL sendCore = (InputDevIsMaster(device) && device->coreEvents);
+    ClientPtr holder;
+    WindowPtr root;
+    GrabPtr grab;
+
+    if (event->type != ET_KeyPress || !active || grabinfo->fromPassiveGrab)
+        return FALSE;
+    if (!sprite || sprite->spriteTraceGood < 1)
+        return FALSE;
+
+    root = sprite->spriteTrace[0];
+    holder = dixClientForGrab(active);
+    if (!holder || !wPassiveGrabs(root))
+        return FALSE;
+
+    grab = FindPassiveGrabOnWindow(root, device, ievent, sendCore, FALSE,
+                                   holder);
+    if (!grab || !GrabMayBeTakenOver(active, NULL))
+        return FALSE;
+
+    if (!DeliverPassiveGrabEvent(device, grab, ievent, ievent, FALSE))
+        return FALSE;
+
+    ForgetPreemptedKey(device);
+    preemptedKeyGrab[device->id] = AllocGrab(grab);
+    if (preemptedKeyGrab[device->id])
+        preemptedKey[device->id] = event->detail.key;
+    return TRUE;
+}
+
+/**
+ * Deliver the KeyRelease of a key whose KeyPress CheckPreemptingGrabs
+ * sent to a hotkey's client to that same client, not to the menu.
+ *
+ * @return TRUE if the event was consumed.
+ */
+Bool
+CheckPreemptedKeyRelease(DeviceIntPtr device, InternalEvent *ievent)
+{
+    GrabPtr grab = preemptedKeyGrab[device->id];
+    DeviceEvent *event = &ievent->device_event;
+
+    if (event->type != ET_KeyRelease || !grab ||
+        event->detail.key != preemptedKey[device->id])
+        return FALSE;
+
+    if (dixClientForGrab(grab) && grab->window->realized)
+        DeliverPassiveGrabEvent(device, grab, ievent, ievent, FALSE);
+    ForgetPreemptedKey(device);
+    return TRUE;
 }
 
 /**
