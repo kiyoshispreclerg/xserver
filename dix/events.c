@@ -104,6 +104,7 @@ Equipment Corporation.
 #include <dix-config.h>
 
 #include <X11/X.h>
+#include <X11/Xatom.h>
 #include <X11/extensions/ge.h>
 #include <X11/extensions/XKBproto.h>
 #include <X11/extensions/XIproto.h>
@@ -127,6 +128,8 @@ Equipment Corporation.
 #include "dix/extension_priv.h"
 #include "dix/input_priv.h"
 #include "dix/inpututils_priv.h"
+#include "dix/property_priv.h"
+#include "propertyst.h"
 #include "dix/reqhandlers_priv.h"
 #include "dix/request_priv.h"
 #include "dix/resource_priv.h"
@@ -4284,6 +4287,158 @@ ForgetGrabSyncRefs(GrabPtr grab)
 }
 
 /**
+ * Is @win's toplevel a popup menu?
+ *
+ * True for an override-redirect toplevel whose _NET_WM_WINDOW_TYPE names a
+ * menu or combo box, which is what Qt and GTK set on their popup menus.
+ * Screen lockers never mark their windows that way, and marking a window only
+ * makes its own owner's grabs yieldable, so a client cannot use this to take
+ * a grab away from anyone else.
+ */
+static Bool
+WindowIsPopupMenu(WindowPtr win)
+{
+    static const char *const menu_types[] = {
+        "_NET_WM_WINDOW_TYPE_POPUP_MENU",
+        "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU",
+        "_NET_WM_WINDOW_TYPE_MENU",
+        "_NET_WM_WINDOW_TYPE_COMBO",
+    };
+    static const char wm_type[] = "_NET_WM_WINDOW_TYPE";
+    Atom type_atom;
+    PropertyPtr prop;
+
+    if (!win || !win->parent)
+        return FALSE;
+    while (win->parent->parent)
+        win = win->parent;
+    if (!win->overrideRedirect || !win->viewable)
+        return FALSE;
+
+    type_atom = MakeAtom(wm_type, strlen(wm_type), FALSE);
+    if (type_atom == None ||
+        dixLookupProperty(&prop, win, type_atom, serverClient,
+                          DixReadAccess) != Success ||
+        prop->type != XA_ATOM || prop->format != 32)
+        return FALSE;
+
+    for (size_t i = 0; i < ARRAY_SIZE(menu_types); i++) {
+        Atom menu = MakeAtom(menu_types[i], strlen(menu_types[i]), FALSE);
+
+        if (menu == None)
+            continue;
+        for (unsigned long n = 0; n < prop->size; n++)
+            if (((CARD32 *) prop->data)[n] == menu)
+                return TRUE;
+    }
+    return FALSE;
+}
+
+/**
+ * Is @grab held for a popup menu?
+ *
+ * Either the grab window is itself a popup menu, or its holder has one mapped:
+ * GTK grabs a menu bar's menus from the menu bar's own toplevel, not from the
+ * popup that shows the entries.
+ */
+static Bool
+GrabIsPopupMenuGrab(GrabPtr grab)
+{
+    ClientPtr holder = dixClientForGrab(grab);
+    WindowPtr win;
+
+    if (WindowIsPopupMenu(grab->window))
+        return TRUE;
+    if (!holder)
+        return FALSE;
+    for (win = grab->window->drawable.pScreen->root->firstChild; win;
+         win = win->nextSib)
+        if (dixClientForWindow(win) == holder && WindowIsPopupMenu(win))
+            return TRUE;
+    return FALSE;
+}
+
+/**
+ * May @client take over the active @grab held by another client?
+ *
+ * A popup menu's grab always yields, even when its holder has the
+ * GRAB_OVERRIDE privilege: a plain "ALLOW <exe>" rule grants every action,
+ * GRAB_OVERRIDE included, and that must not make the menus of trusted desktop
+ * apps immune to hotkeys. Any other grab held by a client with GRAB_OVERRIDE
+ * (e.g. a screen locker) is never displaced, and is otherwise taken over only
+ * by a client granted GRAB_OVERRIDE.
+ */
+static Bool
+GrabMayBeTakenOver(GrabPtr grab, ClientPtr client)
+{
+    if (GrabIsPopupMenuGrab(grab))
+        return TRUE;
+    if (XnotifyHasGrant(dixClientForGrab(grab), XNOTIFY_GRAB_OVERRIDE))
+        return FALSE;
+    return client && XnotifyIsGranted(client, XNOTIFY_GRAB_OVERRIDE);
+}
+
+/**
+ * Make the popup menu holding @mouse's grab pop itself down.
+ *
+ * Losing the grab is not something every toolkit notices (GTK3 on X11 does
+ * not), but a click outside the menu is the one dismissal path they all
+ * implement, and it closes a whole cascade at once. So before the grab is
+ * taken away, send its holder a button 1 press and release far outside the
+ * screen, through the grab itself, as if the user had clicked away.
+ */
+static void
+DismissPopupGrab(DeviceIntPtr mouse)
+{
+    GrabPtr grab = mouse->deviceGrab.grab;
+    DeviceEvent ev;
+
+    if (!grab || !GrabIsPopupMenuGrab(grab))
+        return;
+
+    init_device_event(&ev, mouse, GetTimeInMillis(), EVENT_SOURCE_NORMAL);
+    ev.detail.button = 1;
+    ev.root = grab->window->drawable.pScreen->root->drawable.id;
+    ev.root_x = ev.root_y = -16384;
+
+    ev.type = ET_ButtonPress;
+    DeliverOneGrabbedEvent((InternalEvent *) &ev, mouse, grab->grabtype);
+
+    ev.type = ET_ButtonRelease;
+    SetBit(ev.buttons, 1);
+    ev.corestate = Button1Mask;
+    DeliverOneGrabbedEvent((InternalEvent *) &ev, mouse, grab->grabtype);
+}
+
+/**
+ * After @holder lost its grab on master keyboard @keybd to another
+ * client, take away its active grab on the paired master pointer as well, so
+ * a menu is not left holding the pointer (blocking e.g. a screen locker's
+ * XGrabPointer) and sees the NotifyGrab crossing that makes it pop down.
+ */
+static void
+BreakPairedPointerGrab(DeviceIntPtr keybd, ClientPtr holder)
+{
+    DeviceIntPtr mouse;
+    GrabPtr grab;
+
+    if (!holder || !InputDevIsMaster(keybd))
+        return;
+
+    mouse = GetMaster(keybd, MASTER_POINTER);
+    grab = mouse ? mouse->deviceGrab.grab : NULL;
+    if (!grab || mouse->deviceGrab.fromPassiveGrab || !SameClient(grab, holder))
+        return;
+
+    DismissPopupGrab(mouse);
+
+    if (mouse->deviceGrab.DeactivateGrab == DeactivatePointerGrab)
+        DeactivatePointerGrabWithMode(mouse, NotifyGrab);
+    else
+        (*mouse->deviceGrab.DeactivateGrab) (mouse);
+}
+
+/**
  * Called for keyboard events to deliver event to whatever client owns the
  * focus.
  *
@@ -5281,6 +5436,7 @@ GrabDevice(ClientPtr client, DeviceIntPtr dev,
     Mask access_mode = DixGrabAccess;
     int rc;
     GrabInfoPtr grabInfo = &dev->deviceGrab;
+    ClientPtr displaced = NULL;
     CursorPtr cursor;
 
     UpdateCurrentTime();
@@ -5343,10 +5499,11 @@ GrabDevice(ClientPtr client, DeviceIntPtr dev,
      * replaces it and notifies the previous holder.
      */
     if (grab && !SameClient(grab, client) &&
-        XnotifyIsAllowed(client, XNOTIFY_GRAB_OVERRIDE)) {
+        GrabMayBeTakenOver(grab, client)) {
         /* ActivateGrab frees the old grab without clearing dangling sync
          * references to it, so drop them here as DeactivateGrab would. */
         ForgetGrabSyncRefs(grab);
+        displaced = dixClientForGrab(grab);
         grab = NULL;
     }
     if (grab && grab->grabtype != grabtype)
@@ -5386,8 +5543,13 @@ GrabDevice(ClientPtr client, DeviceIntPtr dev,
         tempGrab->cursor = RefCursor(cursor);
         tempGrab->confineTo = confineTo;
         tempGrab->grabtype = grabtype;
+        if (displaced && IsPointerDevice(dev))
+            DismissPopupGrab(dev);
         (*grabInfo->ActivateGrab) (dev, tempGrab, time, FALSE);
         *status = GrabSuccess;
+
+        if (displaced && IsKeyboardDevice(dev))
+            BreakPairedPointerGrab(dev, displaced);
 
         FreeGrab(tempGrab);
     }
