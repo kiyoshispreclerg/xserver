@@ -1637,6 +1637,8 @@ ActivatePointerGrab(DeviceIntPtr mouse, GrabPtr grab,
     FreeGrab(oldgrab);
 }
 
+static void DeactivatePointerGrabWithMode(DeviceIntPtr mouse, int mode);
+
 /**
  * Delete grab on given device, update the sprite.
  *
@@ -1644,6 +1646,18 @@ ActivatePointerGrab(DeviceIntPtr mouse, GrabPtr grab,
  */
 void
 DeactivatePointerGrab(DeviceIntPtr mouse)
+{
+    DeactivatePointerGrabWithMode(mouse, NotifyUngrab);
+}
+
+/**
+ * DeactivatePointerGrab, with the crossing events sent out of the grab window
+ * in @crossingMode. NotifyGrab tells a popup menu its grab was taken by
+ * someone else, which is what makes toolkits pop it down; NotifyUngrab reads
+ * as a voluntary release and leaves the menu open.
+ */
+static void
+DeactivatePointerGrabWithMode(DeviceIntPtr mouse, int crossingMode)
 {
     GrabPtr grab = mouse->deviceGrab.grab;
     bool wasPassive = !!mouse->deviceGrab.fromPassiveGrab;
@@ -1695,7 +1709,7 @@ DeactivatePointerGrab(DeviceIntPtr mouse)
     }
 
     DoEnterLeaveEvents(mouse, mouse->id, grab->window,
-                       mouse->spriteInfo->sprite->win, NotifyUngrab);
+                       mouse->spriteInfo->sprite->win, crossingMode);
     if (grab->confineTo)
         ConfineCursorToWindow(mouse, InputDevCurrentRootWindow(mouse), FALSE, FALSE);
     PostNewCursor(mouse);
@@ -3789,6 +3803,10 @@ BorderSizeNotEmpty(DeviceIntPtr pDev, WindowPtr pWin)
     return FALSE;
 }
 
+static Bool DeliverPassiveGrabEvent(DeviceIntPtr device, GrabPtr grab,
+                                    InternalEvent *event,
+                                    InternalEvent *real_event, Bool activate);
+
 /**
  * Activate the given passive grab. If the grab is activated successfully, the
  * event has been delivered to the client.
@@ -3804,6 +3822,18 @@ BorderSizeNotEmpty(DeviceIntPtr pDev, WindowPtr pWin)
 Bool
 ActivatePassiveGrab(DeviceIntPtr device, GrabPtr grab, InternalEvent *event,
                     InternalEvent *real_event)
+{
+    return DeliverPassiveGrabEvent(device, grab, event, real_event, TRUE);
+}
+
+/**
+ * ActivatePassiveGrab, or with @activate FALSE only deliver @event to the
+ * passive @grab's client as the grab would, leaving the device's grab state
+ * untouched.
+ */
+static Bool
+DeliverPassiveGrabEvent(DeviceIntPtr device, GrabPtr grab, InternalEvent *event,
+                        InternalEvent *real_event, Bool activate)
 {
     SpritePtr pSprite = device->spriteInfo->sprite;
     xEvent *xE = NULL;
@@ -3855,7 +3885,8 @@ ActivatePassiveGrab(DeviceIntPtr device, GrabPtr grab, InternalEvent *event,
         }
     }
 
-    ActivateGrabNoDelivery(device, grab, event, real_event);
+    if (activate)
+        ActivateGrabNoDelivery(device, grab, event, real_event);
 
     if (xE) {
         FixUpEventFromWindow(pSprite, xE, grab->window, None, TRUE, grab->grabtype);
@@ -4063,6 +4094,11 @@ CheckPassiveGrab(DeviceIntPtr device, GrabPtr grab, InternalEvent *event,
     return TRUE;
 }
 
+static GrabPtr
+FindPassiveGrabOnWindow(WindowPtr pWin, DeviceIntPtr device,
+                        InternalEvent *event, BOOL checkCore, BOOL activate,
+                        ClientPtr excludeClient);
+
 /**
  * "CheckPassiveGrabsOnWindow" checks to see if the event passed in causes a
  * passive grab set on the window to be activated.
@@ -4080,6 +4116,19 @@ GrabPtr
 CheckPassiveGrabsOnWindow(WindowPtr pWin,
                           DeviceIntPtr device,
                           InternalEvent *event, BOOL checkCore, BOOL activate)
+{
+    return FindPassiveGrabOnWindow(pWin, device, event, checkCore, activate,
+                                   NULL);
+}
+
+/**
+ * CheckPassiveGrabsOnWindow, optionally skipping the passive grabs owned by
+ * @excludeClient.
+ */
+static GrabPtr
+FindPassiveGrabOnWindow(WindowPtr pWin, DeviceIntPtr device,
+                        InternalEvent *event, BOOL checkCore, BOOL activate,
+                        ClientPtr excludeClient)
 {
     GrabPtr grab = wPassiveGrabs(pWin);
     GrabPtr tempGrab;
@@ -4115,6 +4164,9 @@ CheckPassiveGrabsOnWindow(WindowPtr pWin,
     tempGrab->next = NULL;
 
     for (; grab; grab = grab->next) {
+        if (excludeClient && SameClient(grab, excludeClient))
+            continue;
+
         if (!CheckPassiveGrab(device, grab, event, checkCore, tempGrab))
             continue;
 
@@ -4212,6 +4264,18 @@ CheckDeviceGrabs(DeviceIntPtr device, InternalEvent *ievent, WindowPtr ancestor)
     if (ret == TRUE && event->type == ET_KeyPress)
         device->deviceGrab.activatingKey = event->detail.key;
     return ret;
+}
+
+/**
+ * Drop references other devices' sync state holds to @grab, as
+ * DeactivateGrab would, before the grab is replaced and freed by ActivateGrab.
+ */
+static void
+ForgetGrabSyncRefs(GrabPtr grab)
+{
+    for (DeviceIntPtr dev = inputInfo.devices; dev; dev = dev->next)
+        if (dev->deviceGrab.sync.other == grab)
+            dev->deviceGrab.sync.other = NullGrab;
 }
 
 /**
@@ -5276,9 +5340,7 @@ GrabDevice(ClientPtr client, DeviceIntPtr dev,
         XnotifyIsAllowed(client, XNOTIFY_GRAB_OVERRIDE)) {
         /* ActivateGrab frees the old grab without clearing dangling sync
          * references to it, so drop them here as DeactivateGrab would. */
-        for (DeviceIntPtr odev = inputInfo.devices; odev; odev = odev->next)
-            if (odev->deviceGrab.sync.other == grab)
-                odev->deviceGrab.sync.other = NullGrab;
+        ForgetGrabSyncRefs(grab);
         grab = NULL;
     }
     if (grab && grab->grabtype != grabtype)
