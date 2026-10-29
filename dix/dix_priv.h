@@ -205,6 +205,10 @@ Bool CheckDeviceGrabs(DeviceIntPtr device,
                       InternalEvent *event,
                       WindowPtr ancestor);
 
+Bool CheckPreemptingGrabs(DeviceIntPtr device, InternalEvent *event);
+
+Bool CheckPreemptedKeyRelease(DeviceIntPtr device, InternalEvent *event);
+
 void DeliverFocusedEvent(DeviceIntPtr keybd,
                          InternalEvent *event,
                          WindowPtr window);
