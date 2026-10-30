@@ -82,6 +82,8 @@ enum drmmode_crtc_property {
 typedef struct {
     int fd;
     unsigned fb_id;
+    /* DRM format of fb_id: a flipped client buffer can differ from the screen */
+    uint32_t fb_format;
     drmModeFBPtr mode_fb;
     int cpp;
     int kbpp;
@@ -272,6 +274,8 @@ typedef struct {
     unsigned prime_pixmap_x;
 
     int src_x, src_y;
+    /* DRM format of the fb the primary plane scans out, 0 if unknown */
+    uint32_t scanout_format;
 
     /**
      * @{ MSC (vblank count) handling for the PRESENT extension.
@@ -417,8 +421,9 @@ void drmmode_copy_fb(ScrnInfoPtr pScrn, drmmode_ptr drmmode);
 void drmmode_copy_damage(xf86CrtcPtr crtc, PixmapPtr dst, RegionPtr damage,
                          Bool empty);
 
-int drmmode_crtc_flip(xf86CrtcPtr crtc, uint32_t fb_id, int x, int y,
-                      uint32_t flags, void *data);
+int drmmode_crtc_flip(xf86CrtcPtr crtc, uint32_t fb_id, uint32_t format,
+                      int x, int y, uint32_t flags, void *data);
+uint32_t drmmode_fb_format(drmmode_ptr drmmode, uint32_t fb_id);
 
 Bool drmmode_crtc_get_fb_id(xf86CrtcPtr crtc, uint32_t *fb_id, int *x, int *y);
 Bool drmmode_crtc_per_crtc_flip_wanted(xf86CrtcPtr crtc);

@@ -719,10 +719,26 @@ drmmode_crtc_get_fb_id(xf86CrtcPtr crtc, uint32_t *fb_id, int *x, int *y)
             ErrorF("failed to add fb %d\n", ret);
             return FALSE;
         }
+        drmmode->fb_format = 0;
         *fb_id = drmmode->fb_id;
     }
 
     return TRUE;
+}
+
+/*
+ * The DRM format of a framebuffer this driver scans out. Only the shared
+ * fb_id can hold a client buffer of another format (a whole-screen Present
+ * flip); per-CRTC flip buffers carry their format along the flip path, and
+ * everything else (front, TearFree, rotation, PRIME) has the screen format.
+ */
+uint32_t
+drmmode_fb_format(drmmode_ptr drmmode, uint32_t fb_id)
+{
+    if (fb_id && fb_id == drmmode->fb_id && drmmode->fb_format)
+        return drmmode->fb_format;
+
+    return drmmode_screen_fb_format(drmmode);
 }
 
 void
@@ -766,6 +782,10 @@ drmmode_set_dpms(ScrnInfoPtr scrn, int dpms, int flags)
                 continue;
             ret |= plane_add_props(req, crtc, fb_id, x, y);
             drmmode_crtc->need_modeset = FALSE;
+            /* The commit result isn't checked, so make the next flip
+             * assume the plane changed rather than trust stale state. */
+            drmmode_crtc->scanout_format = 0;
+            drmmode_crtc->src_x = drmmode_crtc->src_y = -1;
         }
     }
 
@@ -940,6 +960,10 @@ drmmode_crtc_set_mode(xf86CrtcPtr crtc, Bool test_only)
             ret = drmModeAtomicCommit(ms->fd, req, flags, NULL);
 
         if (ret == 0 && !test_only) {
+            drmmode_crtc->scanout_format =
+                active ? drmmode_fb_format(drmmode, fb_id) : 0;
+            drmmode_crtc->src_x = x;
+            drmmode_crtc->src_y = y;
             for (i = 0; i < xf86_config->num_output; i++) {
                 xf86OutputPtr output = xf86_config->output[i];
                 drmmode_output_private_ptr drmmode_output = output->driver_private;
@@ -981,6 +1005,7 @@ drmmode_crtc_set_mode(xf86CrtcPtr crtc, Bool test_only)
     if (!ret && !ms->atomic_modeset) {
         drmmode_crtc->src_x = x;
         drmmode_crtc->src_y = y;
+        drmmode_crtc->scanout_format = drmmode_fb_format(drmmode, fb_id);
     }
 
     drmmode_set_ctm(crtc, ctm);
@@ -990,12 +1015,21 @@ drmmode_crtc_set_mode(xf86CrtcPtr crtc, Bool test_only)
 }
 
 int
-drmmode_crtc_flip(xf86CrtcPtr crtc, uint32_t fb_id, int x, int y,
-                  uint32_t flags, void *data)
+drmmode_crtc_flip(xf86CrtcPtr crtc, uint32_t fb_id, uint32_t format,
+                  int x, int y, uint32_t flags, void *data)
 {
     modesettingPtr ms = modesettingPTR(crtc->scrn);
     drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
+    Bool format_changed = format != drmmode_crtc->scanout_format;
+    Bool src_changed = drmmode_crtc->src_x != x || drmmode_crtc->src_y != y;
     int ret;
+
+    /* An async flip may only change the plane's framebuffer: the kernel
+     * rejects one that also changes the framebuffer format, or (atomic) the
+     * source coordinates, which change when switching between the shared
+     * framebuffer and a per-CRTC one. Flip on the vblank instead. */
+    if (format_changed || (ms->atomic_modeset && src_changed))
+        flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
 
     if (ms->atomic_modeset) {
         drmModeAtomicReq *req = drmModeAtomicAlloc();
@@ -1008,14 +1042,20 @@ drmmode_crtc_flip(xf86CrtcPtr crtc, uint32_t fb_id, int x, int y,
         if (ret == 0)
             ret = drmModeAtomicCommit(ms->fd, req, flags, data);
         drmModeAtomicFree(req);
+        if (ret == 0) {
+            drmmode_crtc->scanout_format = format;
+            drmmode_crtc->src_x = x;
+            drmmode_crtc->src_y = y;
+        }
         return ret;
     }
 
-    /* The frame buffer source coordinates may change when switching between the
-     * primary frame buffer and a per-CRTC frame buffer. Set the correct source
-     * coordinates if they differ for this flip.
+    /* A legacy page flip can't change the frame buffer format or the source
+     * coordinates, which change when switching between the primary frame
+     * buffer and a per-CRTC frame buffer. Set the plane up first if they
+     * differ for this flip.
      */
-    if (drmmode_crtc->src_x != x || drmmode_crtc->src_y != y) {
+    if (format_changed || src_changed) {
         ret = drmModeSetPlane(ms->fd, drmmode_crtc->plane_id,
                               drmmode_crtc->mode_crtc->crtc_id, fb_id, 0,
                               0, 0, crtc->mode.HDisplay, crtc->mode.VDisplay,
@@ -1023,12 +1063,13 @@ drmmode_crtc_flip(xf86CrtcPtr crtc, uint32_t fb_id, int x, int y,
                               crtc->mode.VDisplay << 16);
         if (ret) {
             xf86DrvMsg(crtc->scrn->scrnIndex, X_WARNING,
-                       "error changing fb src coordinates for flip: %d\n", ret);
+                       "error changing fb for flip: %d\n", ret);
             return ret;
         }
 
         drmmode_crtc->src_x = x;
         drmmode_crtc->src_y = y;
+        drmmode_crtc->scanout_format = format;
     }
 
     return drmModePageFlip(ms->fd, drmmode_crtc->mode_crtc->crtc_id,

@@ -194,12 +194,14 @@ ms_pageflip_abort(void *data)
 
 static Bool
 do_queue_flip_on_crtc(ScreenPtr screen, xf86CrtcPtr crtc, uint32_t flags,
-                      uint32_t seq, uint32_t fb_id, int x, int y)
+                      uint32_t seq, uint32_t fb_id, uint32_t format,
+                      int x, int y)
 {
     drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
     drmmode_tearfree_ptr trf = &drmmode_crtc->tearfree;
 
-    while (drmmode_crtc_flip(crtc, fb_id, x, y, flags, (void *)(long)seq)) {
+    while (drmmode_crtc_flip(crtc, fb_id, format, x, y, flags,
+                             (void *)(long)seq)) {
         int err = errno;
 
         /* We may have failed because the event queue was full.  Flush it
@@ -237,7 +239,7 @@ static int
 queue_flip_on_crtc(ScreenPtr screen, xf86CrtcPtr crtc,
                    struct ms_flipdata *flipdata,
                    xf86CrtcPtr ref_crtc, uint32_t flags,
-                   uint32_t fb_id, int x, int y,
+                   uint32_t fb_id, uint32_t format, int x, int y,
                    uint32_t new_present_fb_id)
 {
     drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
@@ -267,7 +269,7 @@ queue_flip_on_crtc(ScreenPtr screen, xf86CrtcPtr crtc,
     /* take a reference on flipdata for use in flip */
     flipdata->flip_count++;
 
-    if (do_queue_flip_on_crtc(screen, crtc, flags, seq, fb_id, x, y))
+    if (do_queue_flip_on_crtc(screen, crtc, flags, seq, fb_id, format, x, y))
         return QUEUE_FLIP_DRM_FLUSH_FAILED;
 
     /* The page flip succeeded; this CRTC now scans out new_present_fb_id
@@ -421,6 +423,7 @@ ms_do_pageflip(ScreenPtr screen,
     xf86CrtcConfigPtr config = XF86_CRTC_CONFIG_PTR(scrn);
     struct gbm_bo *new_front_bo;
     uint32_t flags;
+    uint32_t old_fb_format = ms->drmmode.fb_format;
     int i;
     struct ms_flipdata *flipdata;
 
@@ -488,6 +491,7 @@ ms_do_pageflip(ScreenPtr screen,
             new_front != screen->GetScreenPixmap(screen))
             ms->drmmode.flip_bo_import_failed = FALSE;
     }
+    ms->drmmode.fb_format = drmmode_bo_fb_format(new_front_bo);
 
     /* Queue flips on all enabled CRTCs.
      *
@@ -526,7 +530,9 @@ ms_do_pageflip(ScreenPtr screen,
 
         flip_status = queue_flip_on_crtc(screen, crtc, flipdata,
                                          ref_crtc, flags,
-                                         ms->drmmode.fb_id, crtc->x, crtc->y,
+                                         ms->drmmode.fb_id,
+                                         ms->drmmode.fb_format,
+                                         crtc->x, crtc->y,
                                          /* going to the shared screen fb */ 0);
 
         switch (flip_status) {
@@ -570,6 +576,7 @@ error_undo:
     if (flipdata->flip_count == 1) {
         drmModeRmFB(ms->fd, ms->drmmode.fb_id);
         ms->drmmode.fb_id = flipdata->old_fb_id;
+        ms->drmmode.fb_format = old_fb_format;
     }
 
 error_out:
@@ -668,7 +675,9 @@ ms_do_pageflip_crtc(ScreenPtr screen,
      * starts scanning out new_fb_id and its previous per-CRTC fb is released
      * when this flip completes. */
     flip_status = queue_flip_on_crtc(screen, crtc, flipdata, crtc, flags,
-                                     new_fb_id, 0, 0, new_fb_id);
+                                     new_fb_id,
+                                     drmmode_bo_fb_format(new_front_bo),
+                                     0, 0, new_fb_id);
     switch (flip_status) {
     case QUEUE_FLIP_ALLOC_FAILED:
         xf86DrvMsg(scrn->scrnIndex, X_WARNING,
@@ -782,7 +791,10 @@ ms_do_unflip_crtc(ScreenPtr screen,
      * marks it as no longer owned by a per-CRTC flip, so its previous per-CRTC
      * fb is released on completion and TearFree resumes on it. */
     flip_status = queue_flip_on_crtc(screen, crtc, flipdata, crtc,
-                                     DRM_MODE_PAGE_FLIP_EVENT, fb_id, x, y, 0);
+                                     DRM_MODE_PAGE_FLIP_EVENT, fb_id,
+                                     drmmode_fb_format(&modesettingPTR(scrn)->drmmode,
+                                                       fb_id),
+                                     x, y, 0);
     switch (flip_status) {
     case QUEUE_FLIP_ALLOC_FAILED:
         xf86DrvMsg(scrn->scrnIndex, X_WARNING,
@@ -963,7 +975,9 @@ ms_do_tearfree_flip(ScreenPtr screen, xf86CrtcPtr crtc)
     /* Copy the damage to the back buffer and then flip it at the vblank */
     drmmode_copy_damage(crtc, trf->buf[idx].px, &trf->buf[idx].dmg, TRUE);
     if (do_queue_flip_on_crtc(screen, crtc, DRM_MODE_PAGE_FLIP_EVENT,
-                              seq, trf->buf[idx].fb_id, 0, 0))
+                              seq, trf->buf[idx].fb_id,
+                              drmmode_screen_fb_format(drmmode_crtc->drmmode),
+                              0, 0))
         goto no_flip;
 
     trf->flip_seq = seq;
