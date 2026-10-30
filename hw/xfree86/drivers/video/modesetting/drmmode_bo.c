@@ -51,6 +51,8 @@ static inline uint32_t
 get_opaque_format(uint32_t format)
 {
     switch (format) {
+    case DRM_FORMAT_ARGB1555:
+        return DRM_FORMAT_XRGB1555;
     case DRM_FORMAT_ARGB8888:
         return DRM_FORMAT_XRGB8888;
     case DRM_FORMAT_ARGB2101010:
@@ -393,8 +395,35 @@ drmmode_bo_import(drmmode_ptr drmmode, struct gbm_bo *bo,
         }
     }
 #endif
+
+    /* drmModeAddFB() derives the format from the screen depth, which mislabels
+     * a client buffer of another depth (e.g. a 10-bit buffer on a depth-24
+     * screen), so describe such a buffer by its own format. */
+    if (drmmode_bo_fb_format(bo) != drmmode_screen_fb_format(drmmode)) {
+        uint32_t handles[4] = { gbm_bo_get_handle(bo).u32 };
+        uint32_t strides[4] = { gbm_bo_get_stride(bo) };
+        uint32_t offsets[4] = { 0 };
+
+        return drmModeAddFB2(drmmode->fd, width, height,
+                             drmmode_bo_fb_format(bo), handles, strides,
+                             offsets, fb_id, 0);
+    }
+
     return drmModeAddFB(drmmode->fd, width, height,
                         drmmode->scrn->depth, drmmode->kbpp,
                         gbm_bo_get_stride(bo),
                         gbm_bo_get_handle(bo).u32, fb_id);
+}
+
+uint32_t
+drmmode_bo_fb_format(struct gbm_bo *bo)
+{
+    /* BOs are imported as opaque surfaces */
+    return get_opaque_format(gbm_bo_get_format(bo));
+}
+
+uint32_t
+drmmode_screen_fb_format(drmmode_ptr drmmode)
+{
+    return get_opaque_format(drmmode_gbm_format_for_depth(drmmode->scrn->depth));
 }

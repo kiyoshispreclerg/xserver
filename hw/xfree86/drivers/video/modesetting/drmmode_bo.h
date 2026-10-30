@@ -38,6 +38,14 @@ int
 drmmode_bo_import(drmmode_ptr drmmode, struct gbm_bo *bo,
                   uint32_t *fb_id);
 
+/* The DRM format of the framebuffer drmmode_bo_import() creates for bo */
+uint32_t
+drmmode_bo_fb_format(struct gbm_bo *bo);
+
+/* The DRM format of the screen's own framebuffers (front, shadows) */
+uint32_t
+drmmode_screen_fb_format(drmmode_ptr drmmode);
+
 static inline uint32_t
 drmmode_gbm_format_for_depth(int depth)
 {
