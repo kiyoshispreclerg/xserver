@@ -49,6 +49,10 @@
 #include "glamor/glamor_priv.h"
 #include "os/bug_priv.h"
 
+#ifndef GBM_MAX_PLANES
+#define GBM_MAX_PLANES 4
+#endif
+
 #include "glamor_egl.h"
 #include "glamor_glx_provider.h"
 #include "dri3.h"
@@ -60,6 +64,10 @@ struct glamor_egl_screen_private {
     char *glvnd_vendor; /* GLVND vendor if forced from options or NULL otherwise */
 
     struct gbm_device *gbm;
+#ifdef EGL_MESA_image_dma_buf_export
+    int has_image_dma_buf_export;
+#endif
+
     int fd;
     int dmabuf_capable;
 
@@ -499,14 +507,65 @@ glamor_gbm_bo_from_pixmap_internal(ScreenPtr screen, PixmapPtr pixmap)
     struct glamor_pixmap_private *pixmap_priv =
         glamor_get_pixmap_private(pixmap);
 
+    struct gbm_bo* ret = NULL;
+
     BUG_RETURN_VAL(!pixmap_priv, NULL);
+
+#ifdef EGL_MESA_image_dma_buf_export
+    int fourcc = 0;
+    int num_planes = 0;
+    struct gbm_import_fd_modifier_data fd_modifier_data;
+    EGLuint64KHR modifiers[GBM_MAX_PLANES] = {0};
+#endif
 
     if (!pixmap_priv->image)
         return NULL;
 
-    return gbm_bo_import(glamor_egl->gbm, GBM_BO_IMPORT_EGL_IMAGE,
-                         pixmap_priv->image, GBM_BO_USE_RENDERING);
+    ret = gbm_bo_import(glamor_egl->gbm, GBM_BO_IMPORT_EGL_IMAGE,
+                         pixmap_priv->image, 0);
+
+#ifdef EGL_MESA_image_dma_buf_export
+    if (ret || !glamor_egl->has_image_dma_buf_export) {
+        return ret;
+    }
+#ifndef GBM_MAX_PLANES
+#define GBM_MAX_PLANES 4
+#endif
+
+    if (!eglExportDMABUFImageQueryMESA(glamor_egl->display, pixmap_priv->image, &fourcc, &num_planes, modifiers) || (num_planes > GBM_MAX_PLANES)) {
+        return NULL;
+    }
+
+    fd_modifier_data = (struct gbm_import_fd_modifier_data) {
+        .width = pixmap->drawable.width,
+        .height = pixmap->drawable.height,
+        .format = fourcc, /* GBM and DRM formats are the same */
+        .num_fds = num_planes,
+        .modifier = modifiers[0],
+        .fds = {-1, -1, -1, -1},
+        .strides = {0},
+        .offsets = {0},
+    };
+
+    if (eglExportDMABUFImageMESA(glamor_egl->display, pixmap_priv->image,
+                                    fd_modifier_data.fds,
+                                    fd_modifier_data.strides,
+                                    fd_modifier_data.offsets)) {
+        ret = gbm_bo_import(glamor_egl->gbm, GBM_BO_IMPORT_FD_MODIFIER,
+                            &fd_modifier_data, 0);
+    }
+
+    for (int i = 0; i < num_planes; i++) {
+        if (fd_modifier_data.fds[i] >= 0) {
+            close(fd_modifier_data.fds[i]);
+        }
+    }
+#endif
+    return ret;
 }
+
+
+
 
 struct gbm_bo *
 glamor_gbm_bo_from_pixmap(ScreenPtr screen, PixmapPtr pixmap)
@@ -1254,6 +1313,10 @@ glamor_egl_init(ScrnInfoPtr scrn, int fd)
         goto error;
     }
 
+#ifdef EGL_MESA_image_dma_buf_export
+    glamor_egl->has_image_dma_buf_export = epoxy_has_egl_extension(glamor_egl->display, "EGL_MESA_image_dma_buf_export");
+#endif
+
 #define GLAMOR_CHECK_EGL_EXTENSION(EXT)  \
 	if (!epoxy_has_egl_extension(glamor_egl->display, "EGL_" #EXT)) {  \
 		ErrorF("EGL_" #EXT " required.\n");  \
@@ -1336,6 +1399,8 @@ glamor_egl_init(ScrnInfoPtr scrn, int fd)
         else if (strstr((const char *)renderer, "zink"))
             glamor_egl->dmabuf_capable = TRUE;
         else if (strstr((const char *)renderer, "NVIDIA"))
+            glamor_egl->dmabuf_capable = TRUE;
+        else if (strstr((const char *)renderer, "radeonsi"))
             glamor_egl->dmabuf_capable = TRUE;
         else
             glamor_egl->dmabuf_capable = FALSE;
