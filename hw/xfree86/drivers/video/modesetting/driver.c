@@ -2180,6 +2180,41 @@ SetMaster(ScrnInfoPtr pScrn)
 /* When the root window is created, initialize the screen contents from
  * console if -background none was specified on the command line
  */
+/*
+ * ms_present_check_flip() remembers the window it last allowed to flip, per
+ * CRTC, and ms_present_flip() uses it when a queued flip on that CRTC finally
+ * executes -- possibly after that window was destroyed (e.g. a client exits
+ * while another client's flip waits for this CRTC). Forget a destroyed window,
+ * so such a flip falls back to a copy instead of touching freed memory.
+ */
+static Bool
+msDestroyWindow(WindowPtr pWin)
+{
+    ScreenPtr pScreen = pWin->drawable.pScreen;
+    ScrnInfoPtr pScrn = xf86ScreenToScrn(pScreen);
+    modesettingPtr ms = modesettingPTR(pScrn);
+    xf86CrtcConfigPtr config = XF86_CRTC_CONFIG_PTR(pScrn);
+    Bool ret = TRUE;
+
+    if (ms->flip_window == pWin)
+        ms->flip_window = NULL;
+
+    for (int i = 0; i < config->num_crtc; i++) {
+        drmmode_crtc_private_ptr drmmode_crtc = config->crtc[i]->driver_private;
+
+        if (drmmode_crtc && drmmode_crtc->present_flip_window == pWin)
+            drmmode_crtc->present_flip_window = NULL;
+    }
+
+    pScreen->DestroyWindow = ms->DestroyWindow;
+    if (pScreen->DestroyWindow)
+        ret = pScreen->DestroyWindow(pWin);
+    ms->DestroyWindow = pScreen->DestroyWindow;
+    pScreen->DestroyWindow = msDestroyWindow;
+
+    return ret;
+}
+
 static Bool
 CreateWindow_oneshot(WindowPtr pWin)
 {
@@ -2384,6 +2419,9 @@ ScreenInit(ScreenPtr pScreen, int argc, char **argv)
     pScreen->SaveScreen = ms_SaveScreen;
     ms->CloseScreen = pScreen->CloseScreen;
     pScreen->CloseScreen = CloseScreen;
+
+    ms->DestroyWindow = pScreen->DestroyWindow;
+    pScreen->DestroyWindow = msDestroyWindow;
 
     ms->BlockHandler = pScreen->BlockHandler;
     pScreen->BlockHandler = msBlockHandler_oneshot;
@@ -2649,6 +2687,7 @@ CloseScreen(ScreenPtr pScreen)
     }
 
     pScreen->BlockHandler = ms->BlockHandler;
+    pScreen->DestroyWindow = ms->DestroyWindow;
 
     pScrn->vtSema = FALSE;
     pScreen->CloseScreen = ms->CloseScreen;

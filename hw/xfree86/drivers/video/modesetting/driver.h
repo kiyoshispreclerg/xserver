@@ -117,6 +117,7 @@ typedef struct _modesettingRec {
     Bool noAccel;
     CloseScreenProcPtr CloseScreen;
     CreateWindowProcPtr CreateWindow;
+    DestroyWindowProcPtr DestroyWindow;
     x_server_generation_t SaveGeneration;
 
     ScreenBlockHandlerProcPtr BlockHandler;
