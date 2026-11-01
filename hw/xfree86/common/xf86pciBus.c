@@ -1208,7 +1208,9 @@ xf86VideoPtrToDriverList(struct pci_device *dev, XF86MatchedDrivers *md)
         driverList[0] = "vboxvideo";
         break;
     case 0x15ad:
-        driverList[0] = "vmware";
+        /* the vmware DDX needs Mesa's libxatracker, which was dropped;
+           use modesetting on top of vmwgfx instead */
+        driverList[0] = "modesetting";
         break;
     case 0x18ca:
         if (dev->device_id == 0x47)
