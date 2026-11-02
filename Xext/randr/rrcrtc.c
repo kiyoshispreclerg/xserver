@@ -35,6 +35,9 @@
 
 #include "swaprep.h"
 #include "mipointer.h"
+#ifdef CONFIG_XSCALE
+#include "include/xscale.h"
+#endif
 
 /* xFixed is just `int`, so better check whether it's really 32bit */
 __SIZE_ASSERT(xFixed, sizeof(CARD32));
@@ -245,6 +248,12 @@ RRCrtcNotify(RRCrtcPtr crtc,
      */
     for (i = 0; i < crtc->numOutputs; i++)
         RROutputUpdateComputedDpi(crtc->outputs[i]);
+
+#ifdef CONFIG_XSCALE
+    /* An X-SCALE scanout source only fits the configuration it was set
+     * for: drop it if the CRTC can't take it any more. */
+    XScaleCrtcChanged(crtc);
+#endif
 
     return TRUE;
 }

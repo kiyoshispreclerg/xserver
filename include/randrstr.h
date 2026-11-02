@@ -125,6 +125,11 @@ struct _rrCrtc {
 
     PixmapPtr scanout_pixmap;
     PixmapPtr scanout_pixmap_back;
+
+    /* X-SCALE extension: the compositor-supplied scanout source of this
+     * (transformed) CRTC, NULL while the server fills its scanout itself.
+     * Opaque, owned by Xext/xscale/xscale.c. */
+    void *xscale_source;
 };
 
 struct _rrOutput {
