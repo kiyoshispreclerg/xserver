@@ -37,8 +37,11 @@
 #include "include/dix.h"
 #include "include/dixstruct.h"
 #include "include/extnsionst.h"
+#include "include/list.h"
 #include "include/randrstr.h"
+#include "include/resource.h"
 #include "include/scrnintstr.h"
+#include "include/windowstr.h"
 #include "miext/extinit_priv.h"
 #include "Xext/randr/randrstr_priv.h"       /* VERIFY_RR_CRTC, rrGetScrPriv */
 
@@ -66,6 +69,10 @@ typedef struct {
     int width, height;          /* scanout size the source was set for */
     Bool full;                  /* the next redisplay copies everything */
 } xscale_source_rec, *xscale_source_ptr;
+
+static int xscale_event_base;
+
+static void xscale_notify_scanout(RRCrtcPtr crtc);
 
 /* ------------------------------------------------------------------ *
  *  DDX registration
@@ -147,7 +154,8 @@ xscale_crtc_capable(RRCrtcPtr crtc, int *width, int *height)
  *  Scanout source lifetime
  * ------------------------------------------------------------------ */
 
-/* Tells the DDX the CRTC's source changed. */
+/* Tells the DDX, and every client listening, that the CRTC's source
+ * changed. */
 static void
 xscale_source_changed(RRCrtcPtr crtc)
 {
@@ -155,6 +163,7 @@ xscale_source_changed(RRCrtcPtr crtc)
 
     if (funcs && funcs->source_changed)
         funcs->source_changed(crtc);
+    xscale_notify_scanout(crtc);
 }
 
 /* Forgets the CRTC's source record, without telling anyone. Clearing
@@ -290,6 +299,156 @@ XScaleCrtcChanged(RRCrtcPtr crtc)
 }
 
 /* ------------------------------------------------------------------ *
+ *  XScaleScanoutNotify event delivery
+ *
+ *  A flat list of (client, window, eventMask) listeners, mirroring
+ *  XFixes's cursor-notify listener list (Xext/xfixes/cursor.c) rather than
+ *  RandR's per-window event selection machinery: scanout sources are a
+ *  screen-wide concept, not scoped to a window's hierarchy. The window only
+ *  bounds the selection's lifetime.
+ * ------------------------------------------------------------------ */
+
+typedef struct _xscale_listener {
+    struct xorg_list entry;
+    ClientPtr client;
+    WindowPtr window;
+    XID clientResource;
+    CARD32 eventMask;
+} xscale_listener_rec, *xscale_listener_ptr;
+
+static struct xorg_list xscale_listeners;
+static RESTYPE xscale_client_type;
+static RESTYPE xscale_window_type;
+
+/* Resource destructor of a listener (client gone, selection cancelled,
+ * or its window destroyed). */
+static int
+xscale_free_client(void *data, XID id)
+{
+    xscale_listener_ptr old = data;
+    xscale_listener_ptr e;
+
+    xorg_list_for_each_entry(e, &xscale_listeners, entry) {
+        if (e == old) {
+            xorg_list_del(&e->entry);
+            free(e);
+            break;
+        }
+    }
+    return Success;
+}
+
+/* Resource destructor hanging off a selected window: drops every listener
+ * selected on it. */
+static int
+xscale_free_window(void *data, XID id)
+{
+    WindowPtr window = data;
+    xscale_listener_ptr e, next;
+
+    xorg_list_for_each_entry_safe(e, next, &xscale_listeners, entry) {
+        if (e->window == window)
+            FreeResource(e->clientResource, 0);
+    }
+    return Success;
+}
+
+/* Adds, updates or (eventMask 0) removes the client's selection on window. */
+static int
+xscale_select_input(ClientPtr client, WindowPtr window, CARD32 eventMask)
+{
+    xscale_listener_ptr e;
+    void *val;
+
+    xorg_list_for_each_entry(e, &xscale_listeners, entry) {
+        if (e->client == client && e->window == window) {
+            if (eventMask)
+                e->eventMask = eventMask;
+            else
+                FreeResource(e->clientResource, 0);
+            return Success;
+        }
+    }
+    if (!eventMask)
+        return Success;
+
+    e = calloc(1, sizeof(*e));
+    if (!e)
+        return BadAlloc;
+
+    e->client = client;
+    e->window = window;
+    e->clientResource = FakeClientID(client->index);
+    e->eventMask = eventMask;
+
+    /* A resource on the window so we notice it being destroyed; one is
+     * enough however many listeners select on it. */
+    if (dixLookupResourceByType(&val, window->drawable.id, xscale_window_type,
+                                serverClient, DixGetAttrAccess) != Success) {
+        if (!AddResource(window->drawable.id, xscale_window_type, window)) {
+            free(e);
+            return BadAlloc;
+        }
+    }
+
+    /* Listed first: on failure AddResource() runs xscale_free_client(),
+     * which unlinks and frees it. */
+    xorg_list_append(&e->entry, &xscale_listeners);
+    if (!AddResource(e->clientResource, xscale_client_type, e))
+        return BadAlloc;
+    return Success;
+}
+
+static CARD8 xscale_scanout_flags(RRCrtcPtr crtc, ClientPtr asking,
+                                  int *width, int *height);
+
+/* Sends XScaleScanoutNotify for `crtc` to every listener. */
+static void
+xscale_notify_scanout(RRCrtcPtr crtc)
+{
+    xscale_listener_ptr e;
+    int width, height;
+    CARD8 flags;
+
+    if (noXScaleExtension || xorg_list_is_empty(&xscale_listeners))
+        return;
+
+    flags = xscale_scanout_flags(crtc, NULL, &width, &height);
+
+    xorg_list_for_each_entry(e, &xscale_listeners, entry) {
+        if (!(e->eventMask & XScaleScanoutNotifyMask))
+            continue;
+
+        xXScaleScanoutNotifyEvent ev = {
+            .type = xscale_event_base + XScaleScanoutNotify,
+            .flags = flags,
+            .window = e->window->drawable.id,
+            .crtc = crtc->id,
+            .scanoutWidth = width,
+            .scanoutHeight = height,
+            .timestamp = currentTime.milliseconds,
+        };
+
+        WriteEventsToClient(e->client, 1, (xEvent *) &ev);
+    }
+}
+
+/* Byte-swaps an XScaleScanoutNotify for a client of the other byte order. */
+static void _X_COLD
+SXScaleScanoutNotifyEvent(xXScaleScanoutNotifyEvent *from,
+                          xXScaleScanoutNotifyEvent *to)
+{
+    to->type = from->type;
+    to->flags = from->flags;
+    cpswaps(from->sequenceNumber, to->sequenceNumber);
+    cpswapl(from->window, to->window);
+    cpswapl(from->crtc, to->crtc);
+    cpswaps(from->scanoutWidth, to->scanoutWidth);
+    cpswaps(from->scanoutHeight, to->scanoutHeight);
+    cpswapl(from->timestamp, to->timestamp);
+}
+
+/* ------------------------------------------------------------------ *
  *  Auto-revert on client disconnect (compositor crash/exit)
  * ------------------------------------------------------------------ */
 
@@ -363,6 +522,29 @@ ProcXScaleQueryVersion(ClientPtr client)
     X_REPLY_FIELD_CARD32(majorVersion);
     X_REPLY_FIELD_CARD32(minorVersion);
     return X_SEND_REPLY_SIMPLE(client, reply);
+}
+
+/* XScaleSelectInput: (un)subscribes the client to XScaleScanoutNotify. */
+static int
+ProcXScaleSelectInput(ClientPtr client)
+{
+    WindowPtr window;
+    int err;
+
+    X_REQUEST_HEAD_STRUCT(xXScaleSelectInputReq);
+    X_REQUEST_FIELD_CARD32(window);
+    X_REQUEST_FIELD_CARD32(eventMask);
+
+    err = dixLookupWindow(&window, stuff->window, client, DixGetAttrAccess);
+    if (err != Success)
+        return err;
+
+    if (stuff->eventMask & ~(CARD32) XScaleScanoutNotifyMask) {
+        client->errorValue = stuff->eventMask;
+        return BadValue;
+    }
+
+    return xscale_select_input(client, window, stuff->eventMask);
 }
 
 /* XScaleGetCrtcScanout: the CRTC's flags, physical size and logical box. */
@@ -453,6 +635,7 @@ ProcXScaleDispatch(ClientPtr client)
 
     switch (stuff->data) {
     case X_XScaleQueryVersion:          return ProcXScaleQueryVersion(client);
+    case X_XScaleSelectInput:           return ProcXScaleSelectInput(client);
     case X_XScaleGetCrtcScanout:        return ProcXScaleGetCrtcScanout(client);
     case X_XScaleSetCrtcScanoutSource:  return ProcXScaleSetCrtcScanoutSource(client);
     default:                            return BadRequest;
@@ -474,6 +657,16 @@ XScaleExtensionInit(void)
     if (noXScaleExtension)
         return;
 
+    xorg_list_init(&xscale_listeners);
+    xscale_client_type = CreateNewResourceType(xscale_free_client,
+                                               "XScaleClient");
+    xscale_window_type = CreateNewResourceType(xscale_free_window,
+                                               "XScaleWindow");
+    if (!xscale_client_type || !xscale_window_type) {
+        noXScaleExtension = TRUE;
+        return;
+    }
+
     if (!AddCallback(&ClientStateCallback, xscale_client_state, NULL)) {
         noXScaleExtension = TRUE;
         return;
@@ -487,4 +680,8 @@ XScaleExtensionInit(void)
         noXScaleExtension = TRUE;
         return;
     }
+
+    xscale_event_base = ext->eventBase;
+    EventSwapVector[xscale_event_base + XScaleScanoutNotify] =
+        (EventSwapPtr) SXScaleScanoutNotifyEvent;
 }
