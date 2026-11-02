@@ -1418,9 +1418,19 @@ PreInit(ScrnInfoPtr pScrn, int flags)
     if (!xf86SetDefaultVisual(pScrn, -1))
         return FALSE;
 
-    if (xf86ReturnOptValBool(ms->drmmode.Options, OPTION_SW_CURSOR, FALSE)) {
-        ms->drmmode.sw_cursor = TRUE;
-    } else {
+    {
+        Bool sw_cursor_opt = FALSE;
+        Bool sw_cursor_set = xf86GetOptValBool(ms->drmmode.Options,
+                                               OPTION_SW_CURSOR,
+                                               &sw_cursor_opt);
+
+        if (sw_cursor_set && sw_cursor_opt) {
+            ms->drmmode.sw_cursor = TRUE;
+        } else if (sw_cursor_set) {
+            /* explicit "SWcursor" "off": user wants the hardware cursor */
+            xf86DrvMsg(pScrn->scrnIndex, X_CONFIG,
+                       "SWcursor explicitly disabled, not forcing software cursor on virtual GPUs\n");
+        } else {
         /* we have situation where cursor in virtual envirioment doesn't work as expected and can be confusing for users, for example under qemu:
          * - if display backend is `gtk`, by default cursor is showed when window is out of focus and hidden when in focus (it have to be rendered by vm gpu in software).
          * - if display backend us `sdl` it always shows cursor regardless of drmModeSetCursor2 & friends settings
@@ -1440,6 +1450,7 @@ PreInit(ScrnInfoPtr pScrn, int flags)
             drmFreeVersion(version);
 
             ms->drmmode.sw_cursor = TRUE;
+        }
         }
     }
 
