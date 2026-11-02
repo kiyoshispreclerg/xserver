@@ -680,5 +680,15 @@ ms_present_screen_init(ScreenPtr screen)
                    "driver; using whole-screen flips\n");
     }
 
+    /* Without kernel vblank every Present request would fail to queue and run
+     * immediately, leaving clients unthrottled. Don't offer a CRTC, so Present
+     * falls back to its own 60Hz timer, the way a DDX without vblank gets
+     * throttled. */
+    if (!ms_probe_kernel_vblank(screen)) {
+        xf86DrvMsg(screen->myNum, X_INFO, "Kernel driver has no vblank "
+                   "support; Present will use a 60Hz software timer\n");
+        info.get_crtc = NULL;
+    }
+
     return present_screen_init(screen, &info);
 }
