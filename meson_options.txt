@@ -103,6 +103,8 @@ option('xselinux', type: 'combo', choices: ['true', 'false', 'auto'], value: 'au
        description: 'XSELINUX extension')
 option('namespace', type: 'boolean', value: true,
        description: 'Container/namespace extension')
+option('xscale', type: 'boolean', value: true,
+       description: 'X-SCALE extension (compositor-supplied scanout for scaled outputs)')
 option('xinerama', type: 'boolean', value: true,
        description: 'Xinerama extension')
 option('xcsecurity', type: 'boolean', value: false,

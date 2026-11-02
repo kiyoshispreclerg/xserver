@@ -591,6 +591,7 @@ endif
 build_xinerama = get_option('xinerama')
 build_xsecurity = get_option('xcsecurity')
 build_namespace = get_option('namespace')
+build_xscale = get_option('xscale')
 
 build_xv = get_option('xv')
 build_xvmc = get_option('xvmc')
@@ -842,6 +843,11 @@ if build_xserver
     if build_namespace
         subdir('Xext/namespace')
         libxserver += libxserver_namespace
+    endif
+
+    if build_xscale
+        subdir('Xext/xscale')
+        libxserver += libxserver_xscale
     endif
 endif
 
