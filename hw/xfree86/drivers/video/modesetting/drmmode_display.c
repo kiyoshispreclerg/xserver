@@ -1914,6 +1914,20 @@ drmmode_set_mode_major(xf86CrtcPtr crtc, DisplayModePtr mode,
         if (can_test)
             drmmode_crtc_set_mode(crtc, FALSE);
         ms->pending_modeset = FALSE;
+
+        /* The modeset pointed this CRTC at drmmode_crtc_get_fb_id()'s fb
+         * (TearFree buffer, rotation shadow or the shared front), so it no
+         * longer scans out a per-CRTC Present flip's fb, whatever Present
+         * believes. drmmmode_prepare_modeset() normally unflips first, but
+         * when that doesn't reach this CRTC -- e.g. a screen resize for
+         * xrandr --scale-from while a compositor was flipping it -- the
+         * stale fb id made ms_tearfree_do_flips() skip the CRTC forever,
+         * freezing it until TearFree was turned off. Release it here, the
+         * same way a completed unflip does. */
+        if (drmmode_crtc->present_flip_fb_id) {
+            drmModeRmFB(drmmode->fd, drmmode_crtc->present_flip_fb_id);
+            drmmode_crtc->present_flip_fb_id = 0;
+        }
     }
 
  done:
