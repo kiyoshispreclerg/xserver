@@ -6,6 +6,7 @@ srcs_xorg_modes = [
     'xf86Modes.c',
     'xf86RandR12.c',
     'xf86Rotate.c',
+    'xf86XScale.c',
 ]
 
 if build_dga
