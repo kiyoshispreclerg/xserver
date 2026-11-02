@@ -38,6 +38,10 @@
 #include "xf86Crtc.h"
 #include "xf86Modes.h"
 #include "xf86RandR12.h"
+#ifdef CONFIG_XSCALE
+#include "include/xscale.h"
+#endif
+#include "xf86XScale_priv.h"
 
 void
 xf86RotateCrtcRedisplay(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
@@ -107,7 +111,7 @@ xf86RotateCrtcRedisplay(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
     FreePicture(dst, None);
 }
 
-static void
+void
 xf86CrtcDamageShadow(xf86CrtcPtr crtc)
 {
     ScrnInfoPtr pScrn = crtc->scrn;
@@ -198,6 +202,11 @@ xf86RotateRedisplay(ScreenPtr pScreen)
         for (c = 0; c < xf86_config->num_crtc; c++) {
             xf86CrtcPtr crtc = xf86_config->crtc[c];
 
+#ifdef CONFIG_XSCALE
+            /* Fed by its X-SCALE source instead, below */
+            if (XScaleCrtcHasSource(crtc->randr_crtc))
+                continue;
+#endif
             if (crtc->transform_in_use && crtc->enabled) {
                 RegionRec crtc_damage;
 
@@ -217,6 +226,15 @@ xf86RotateRedisplay(ScreenPtr pScreen)
         pScreen->SourceValidate = SourceValidate;
         DamageEmpty(damage);
     }
+
+#ifdef CONFIG_XSCALE
+    {
+        int c;
+
+        for (c = 0; c < xf86_config->num_crtc; c++)
+            xf86RotateScanoutRedisplay(pScreen, xf86_config->crtc[c]);
+    }
+#endif
     return TRUE;
 }
 

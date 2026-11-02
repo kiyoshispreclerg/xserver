@@ -40,6 +40,7 @@
 #include "xf86Opt_priv.h"
 #include "xf86Priv.h"
 #include "xf86RandR12_priv.h"
+#include "xf86XScale_priv.h"
 #include "X11/extensions/render.h"
 #include "X11/extensions/dpmsconst.h"
 #include "X11/Xatom.h"
@@ -827,6 +828,12 @@ xf86CrtcScreenInit(ScreenPtr screen)
         xf86RandR12SetRotations(screen, RR_Rotate_0);
         xf86RandR12SetTransformSupport(screen, FALSE);
     }
+
+#ifdef CONFIG_XSCALE
+    /* Same condition as transform support: X-SCALE feeds the shadow */
+    if (c == config->num_crtc)
+        xf86RotateScanoutInit(screen);
+#endif
 
     dixScreenHookClose(screen, xf86CrtcCloseScreen);
     dixScreenHookPostCreateResources(screen, xf86CrtcCreateScreenResources);
