@@ -32,6 +32,10 @@
 #include <X11/extensions/dpmsconst.h>
 
 #include "include/xf86DDC.h"
+#ifdef CONFIG_XSCALE
+#include <math.h>
+#include "include/xscale.h"
+#endif
 
 #include "xf86.h"
 #include "xf86Crtc.h"
@@ -445,6 +449,28 @@ xf86_crtc_set_cursor_position(xf86CrtcPtr crtc, int x, int y)
     else {
         crtc_x -= crtc->x;
         crtc_y -= crtc->y;
+#ifdef CONFIG_XSCALE
+        /* X-SCALE: on a CRTC fed by a scanout source the pointer lives in
+         * the CRTC's logical footprint while the cursor plane is positioned
+         * in its physical pixels, so scale this CRTC's local offset by its
+         * own factor. Done here rather than on the desktop position every
+         * CRTC receives, so each CRTC decides independently: the cursor is
+         * already right on a scaled CRTC while straddling the edge of an
+         * unscaled (or differently scaled) neighbour. The unscaled hotspot
+         * xf86SetCursor() subtracted upstream (hw/xfree86/ramdac/
+         * xf86HWCurs.c) falls out of this: scaling the whole hotspot-
+         * adjusted offset is subtracting the scaled hotspot from the scaled
+         * tip, which is right once the bitmap is scaled by the same factor
+         * (xf86_crtc_load_cursor_argb() below). */
+        if (crtc->randr_crtc) {
+            double sx, sy;
+
+            if (XScaleGetCrtcScale(crtc->randr_crtc, &sx, &sy)) {
+                crtc_x = (int) lround(crtc_x * sx);
+                crtc_y = (int) lround(crtc_y * sy);
+            }
+        }
+#endif
     }
 
     /*
@@ -565,8 +591,20 @@ xf86_use_hw_cursor(ScreenPtr screen, CursorPtr cursor)
         if (!crtc->enabled)
             continue;
 
-        if (crtc->transformPresent)
+        if (crtc->transformPresent) {
+#ifdef CONFIG_XSCALE
+            /* A CRTC fed by an X-SCALE scanout source doesn't show the
+             * root, so the software cursor can't appear on it at all; its
+             * transform is a plain scale, which the position and bitmap
+             * scaling in this file follow. */
+            double sx, sy;
+
+            if (crtc->randr_crtc &&
+                XScaleGetCrtcScale(crtc->randr_crtc, &sx, &sy))
+                continue;
+#endif
             return FALSE;
+        }
     }
 
     return TRUE;
@@ -605,11 +643,28 @@ xf86_crtc_load_cursor_argb(xf86CrtcPtr crtc, CursorPtr cursor)
     int image_width = cursor_info->MaxWidth;
     int image_height = cursor_info->MaxHeight;
     const Rotation rotation = xf86_crtc_cursor_rotation(crtc);
+#ifdef CONFIG_XSCALE
+    /* X-SCALE: on a CRTC fed by a scanout source, upscale the glyph
+     * (nearest neighbour) into the fixed-size hardware buffer instead of
+     * placing it 1:1, so the cursor keeps the size it has on the logical
+     * desktop instead of looking undersized at the panel's physical
+     * density. Blockier than a cursor theme drawn at that size; a glyph
+     * that no longer fits the buffer once scaled is clipped. */
+    double scale_x = 1.0, scale_y = 1.0;
+    Bool scaled = crtc->randr_crtc &&
+                  XScaleGetCrtcScale(crtc->randr_crtc, &scale_x, &scale_y);
+#endif
 
     for (y = 0; y < image_height; y++)
         for (x = 0; x < image_width; x++) {
             xf86_crtc_rotate_coord(rotation, image_width, image_height, x, y,
                                    &xin, &yin);
+#ifdef CONFIG_XSCALE
+            if (scaled) {
+                xin = (int) (xin / scale_x);
+                yin = (int) (yin / scale_y);
+            }
+#endif
             if (xin < source_width && yin < source_height)
                 bits = cursor_source[yin * source_width + xin];
             else

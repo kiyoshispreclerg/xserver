@@ -84,6 +84,20 @@ extern _X_EXPORT Bool XScaleTakeScanoutDamage(RRCrtcPtr crtc,
                                               RegionPtr damage);
 
 /*
+ * XScaleGetCrtcScale - the hardware cursor's scale on a CRTC with a source.
+ * @crtc: the CRTC.
+ * @sx:   out, the CRTC's physical/logical ratio (> 1 when the output is
+ * @sy:   magnified), only written when returning TRUE.
+ *
+ * TRUE iff the CRTC has a source and a scale-only transform. On such a
+ * CRTC the hardware cursor is what shows the pointer - the software
+ * cursor is drawn into the root, which the CRTC no longer shows - so the
+ * cursor code allows it there and scales its position and bitmap by this
+ * (hw/xfree86/modes/xf86Cursors.c, and the modesetting DDX's crop).
+ */
+extern _X_EXPORT Bool XScaleGetCrtcScale(RRCrtcPtr crtc, double *sx, double *sy);
+
+/*
  * XScaleCrtcChanged - a CRTC's configuration was just updated.
  * @crtc: the CRTC.
  *
