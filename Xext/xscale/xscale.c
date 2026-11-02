@@ -279,6 +279,14 @@ XScaleTakeScanoutDamage(RRCrtcPtr crtc, DrawablePtr *source,
     return TRUE;
 }
 
+Bool
+XScaleGetCrtcScale(RRCrtcPtr crtc, double *sx, double *sy)
+{
+    if (!crtc || !crtc->xscale_source)
+        return FALSE;
+    return xscale_crtc_scale(crtc, sx, sy);
+}
+
 void
 XScaleCrtcChanged(RRCrtcPtr crtc)
 {
