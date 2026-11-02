@@ -237,7 +237,8 @@ ms_get_kernel_ust_msc(xf86CrtcPtr crtc,
 
         ret = drmCrtcGetSequence(ms->fd, drmmode_crtc->mode_crtc->crtc_id,
                                  msc, &ns);
-        if (ret != -1 || (errno != ENOTTY && errno != EINVAL)) {
+        if (ret != -1 || (errno != ENOTTY && errno != EINVAL &&
+                          errno != EOPNOTSUPP)) {
             ms->has_queue_sequence = TRUE;
             if (ret == 0)
                 *ust = ns / 1000;
@@ -345,7 +346,8 @@ ms_queue_vblank_internal(xf86CrtcPtr crtc, ms_queue_flag flags,
                 return TRUE;
             }
 
-            if (ret != -1 || (errno != ENOTTY && errno != EINVAL)) {
+            if (ret != -1 || (errno != ENOTTY && errno != EINVAL &&
+                              errno != EOPNOTSUPP)) {
                 ms->has_queue_sequence = TRUE;
                 goto check;
             }
@@ -670,6 +672,49 @@ Bool
 ms_drm_queue_is_empty(void)
 {
     return xorg_list_is_empty(&ms_drm_queue);
+}
+
+/*
+ * Find out whether the kernel driver supports vblank at all. The DRM core
+ * answers EOPNOTSUPP to both the sequence and the legacy wait-vblank ioctls
+ * when the device has no vblank support, as vmwgfx does, so that is a device
+ * wide answer and doesn't depend on which CRTC is asked.
+ */
+Bool
+ms_probe_kernel_vblank(ScreenPtr screen)
+{
+    ScrnInfoPtr scrn = xf86ScreenToScrn(screen);
+    modesettingPtr ms = modesettingPTR(scrn);
+    xf86CrtcConfigPtr xf86_config = XF86_CRTC_CONFIG_PTR(scrn);
+    drmmode_crtc_private_ptr drmmode_crtc;
+    uint64_t msc, ns;
+    drmVBlank vbl;
+    int c;
+
+    ms->no_kernel_vblank = FALSE;
+
+    for (c = 0; c < xf86_config->num_crtc; c++) {
+        drmmode_crtc = xf86_config->crtc[c]->driver_private;
+        if (!drmmode_crtc || !drmmode_crtc->mode_crtc)
+            continue;
+
+        if (drmCrtcGetSequence(ms->fd, drmmode_crtc->mode_crtc->crtc_id,
+                               &msc, &ns) == 0)
+            return TRUE;
+        if (errno != EOPNOTSUPP && errno != ENOTTY && errno != EINVAL)
+            return TRUE;
+
+        vbl.request.type = DRM_VBLANK_RELATIVE | drmmode_crtc->vblank_pipe;
+        vbl.request.sequence = 0;
+        vbl.request.signal = 0;
+        if (drmWaitVBlank(ms->fd, &vbl) == 0 || errno != EOPNOTSUPP)
+            return TRUE;
+
+        ms->no_kernel_vblank = TRUE;
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 Bool
