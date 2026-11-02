@@ -143,6 +143,8 @@ typedef struct _modesettingRec {
 
     Bool has_queue_sequence;
     Bool tried_queue_sequence;
+    /* The kernel driver has no vblank support at all (vmwgfx, for one) */
+    Bool no_kernel_vblank;
 
     Bool kms_has_modifiers;
 
@@ -232,6 +234,7 @@ Bool ms_dri2_screen_init(ScreenPtr screen);
 void ms_dri2_close_screen(ScreenPtr screen);
 
 Bool ms_vblank_screen_init(ScreenPtr screen);
+Bool ms_probe_kernel_vblank(ScreenPtr screen);
 void ms_vblank_close_screen(ScreenPtr screen);
 
 Bool ms_present_screen_init(ScreenPtr screen);
