@@ -43,8 +43,8 @@
 #endif
 #include "xf86XScale_priv.h"
 
-void
-xf86RotateCrtcRedisplay(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
+static void
+xf86CrtcCompositeRegion(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
                         DrawableRec *src_drawable, RegionPtr region,
                         Bool transform_src)
 {
@@ -57,9 +57,6 @@ xf86RotateCrtcRedisplay(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
     BoxPtr b = RegionRects(region);
     XID include_inferiors = IncludeInferiors;
 
-    if (crtc->driverIsPerformingTransform & XF86DriverTransformOutput)
-        return;
-
     src = CreatePicture(None,
                         src_drawable,
                         format,
@@ -71,13 +68,15 @@ xf86RotateCrtcRedisplay(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
     dst = CreatePicture(None,
                         &dst_pixmap->drawable,
                         format, 0L, NULL, serverClient, &error);
-    if (!dst)
+    if (!dst) {
+        FreePicture(src, None);
         return;
+    }
 
     if (transform_src) {
         error = SetPictureTransform(src, &crtc->crtc_to_framebuffer);
         if (error)
-            return;
+            goto out;
     }
     if (crtc->transform_in_use && crtc->filter)
         SetPicturePictFilter(src, crtc->filter, crtc->params, crtc->nparams);
@@ -107,8 +106,21 @@ xf86RotateCrtcRedisplay(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
             b++;
         }
     }
+ out:
     FreePicture(src, None);
     FreePicture(dst, None);
+}
+
+void
+xf86RotateCrtcRedisplay(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
+                        DrawableRec *src_drawable, RegionPtr region,
+                        Bool transform_src)
+{
+    if (crtc->driverIsPerformingTransform & XF86DriverTransformOutput)
+        return;
+
+    xf86CrtcCompositeRegion(crtc, dst_pixmap, src_drawable, region,
+                            transform_src);
 }
 
 void
