@@ -736,6 +736,14 @@ ms_tearfree_update_damages(ScreenPtr pScreen)
     RegionPtr dirty = DamageRegion(ms->damage);
     int c, i;
 
+    /* What compositors drew into the X-SCALE sources of CRTCs rendered
+     * through their transform here, as screen damage over the area each
+     * shows, so it is read just below like any other. */
+    for (c = 0; c < xf86_config->num_crtc; c++) {
+        if (drmmode_crtc_renders_transform(xf86_config->crtc[c]))
+            xf86CrtcDamageFromScanoutSource(xf86_config->crtc[c]);
+    }
+
     if (RegionNil(dirty))
         return;
 
@@ -2272,6 +2280,8 @@ ScreenInit(ScreenPtr pScreen, int argc, char **argv)
 
     if (!xf86CrtcScreenInit(pScreen))
         return FALSE;
+
+    drmmode_xscale_init(pScreen);
 
     if (!drmmode_setup_colormap(pScreen, pScrn))
         return FALSE;

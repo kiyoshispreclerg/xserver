@@ -145,6 +145,11 @@ typedef struct {
     Bool use_ctm;
 
     Bool pending_modeset;
+
+    /* The X-SCALE functions the xf86 modes layer registered, which this
+     * driver's own (drmmode_xscale_init) fall back to for the CRTCs it
+     * doesn't render itself. */
+    const struct _XScaleScanoutFuncs *xscale_lower_funcs;
 } drmmode_rec, *drmmode_ptr;
 
 typedef struct {
@@ -392,6 +397,7 @@ Bool drmmode_crtc_per_crtc_flip_wanted(xf86CrtcPtr crtc);
 Bool drmmode_crtc_tearfree_wanted(xf86CrtcPtr crtc);
 Bool drmmode_crtc_renders_transform(xf86CrtcPtr crtc);
 Bool drmmode_crtc_is_transformed(xf86CrtcPtr crtc);
+void drmmode_xscale_init(ScreenPtr pScreen);
 
 void drmmode_set_dpms(ScrnInfoPtr scrn, int PowerManagementMode, int flags);
 void drmmode_crtc_set_vrr(xf86CrtcPtr crtc, Bool enabled);
