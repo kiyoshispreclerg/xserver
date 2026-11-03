@@ -18,6 +18,11 @@ void xf86RotateScanoutInit(ScreenPtr pScreen);
 /* Copies the CRTC's X-SCALE source into its shadow, from
  * xf86RotateRedisplay(). */
 void xf86RotateScanoutRedisplay(ScreenPtr pScreen, xf86CrtcPtr crtc);
+
+/* xf86CrtcTransformRedisplay() for a CRTC with an X-SCALE source; FALSE
+ * when it has none. */
+Bool xf86CrtcCopyScanoutSource(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
+                               RegionPtr region);
 #endif
 
 #endif /* _XSERVER_XF86XSCALE_PRIV_H_ */
