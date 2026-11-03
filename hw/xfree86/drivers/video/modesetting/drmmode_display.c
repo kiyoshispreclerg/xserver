@@ -1452,6 +1452,26 @@ drmmode_copy_fb(ScrnInfoPtr pScrn, drmmode_ptr drmmode)
 #endif
 }
 
+/*
+ * A transformed CRTC (rotated, reflected, xrandr --scale or --transform)
+ * with TearFree is rendered by this driver straight into its TearFree
+ * buffers, through the transform (XF86DriverTransformOutput). Otherwise the
+ * xf86 modes layer keeps a shadow of the CRTC's size for it, which TearFree
+ * would only copy into its buffers again: one CRTC-sized buffer and one
+ * copy per frame for nothing. Without TearFree that shadow is what the
+ * CRTC scans out, and stays. X-SCALE sources take the same shortcut: they
+ * are copied into the TearFree buffers directly (drmmode_xscale_init()).
+ */
+static Bool
+drmmode_crtc_rotate(xf86CrtcPtr crtc, Bool tearfree)
+{
+    if (tearfree)
+        crtc->driverIsPerformingTransform |= XF86DriverTransformOutput;
+    else
+        crtc->driverIsPerformingTransform &= ~XF86DriverTransformOutput;
+    return xf86CrtcRotate(crtc);
+}
+
 /* Does this driver render the CRTC's transformed picture itself, into its
  * TearFree buffers? */
 Bool
@@ -1479,7 +1499,10 @@ drmmode_copy_damage(xf86CrtcPtr crtc, PixmapPtr dst, RegionPtr dmg, Bool empty)
     DrawableRec *src;
 
     /* Copy the screen's pixmap into the destination pixmap */
-    if (crtc->rotatedPixmap) {
+    if (drmmode_crtc_renders_transform(crtc)) {
+        /* Through the transform, or from the CRTC's X-SCALE source */
+        xf86CrtcTransformRedisplay(crtc, dst, dmg);
+    } else if (crtc->rotatedPixmap) {
         src = &crtc->rotatedPixmap->drawable;
         xf86RotateCrtcRedisplay(crtc, dst, src, dmg, FALSE);
     } else {
@@ -1673,7 +1696,7 @@ drmmode_set_mode_major(xf86CrtcPtr crtc, DisplayModePtr mode,
         crtc->y = y;
         crtc->rotation = rotation;
 
-        if (!xf86CrtcRotate(crtc)) {
+        if (!drmmode_crtc_rotate(crtc, drmmode_crtc_tearfree_wanted(crtc))) {
             goto done;
         }
 
@@ -1681,6 +1704,10 @@ drmmode_set_mode_major(xf86CrtcPtr crtc, DisplayModePtr mode,
                                crtc->gamma_blue, crtc->gamma_size);
 
         ret = drmmode_create_tearfree_shadow(crtc);
+        /* No TearFree buffers to render a transformed picture into: let the
+         * xf86 modes layer's shadow do it, without TearFree. */
+        if (!ret && drmmode_crtc_renders_transform(crtc))
+            ret = drmmode_crtc_rotate(crtc, FALSE);
         if (!ret)
             goto done;
 
@@ -4638,7 +4665,10 @@ drmmode_set_desired_modes(ScrnInfoPtr pScrn, drmmode_ptr drmmode, Bool set_hw,
             crtc->rotation = crtc->desiredRotation;
             crtc->x = crtc->desiredX;
             crtc->y = crtc->desiredY;
-            if (!xf86CrtcRotate(crtc))
+            /* Nothing (re)builds TearFree buffers here: render through the
+             * transform into them only if they already exist. */
+            if (!drmmode_crtc_rotate(crtc,
+                                     drmmode_crtc->tearfree.buf[0].px != NULL))
                 return FALSE;
         }
     }

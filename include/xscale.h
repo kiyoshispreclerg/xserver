@@ -6,7 +6,9 @@
  * shadow buffer the DDX normally fills by magnifying the root. X-SCALE lets
  * a compositor give the CRTC a *scanout source* instead: a drawable already
  * at the CRTC's physical resolution, which the DDX copies into that shadow
- * in place of the magnified root (Xext/xscale/xscale.c, doc/x-scale.md).
+ * (or straight into its TearFree buffers, when it does the transform
+ * itself) in place of the magnified root (Xext/xscale/xscale.c,
+ * doc/x-scale.md).
  *
  * Every helper here is a strict no-op for a CRTC without a source, so they
  * are safe to call unconditionally from code that is always built. Guard
