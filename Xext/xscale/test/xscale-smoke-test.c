@@ -14,6 +14,10 @@
  *      capability on an untransformed CRTC.
  *   4. SetCrtcScanoutSource with a pixmap is refused (BadMatch) there.
  *   5. SetCrtcScanoutSource with None (give back) is always accepted.
+ *   6. CopyCrtcScanout of an untransformed CRTC reproduces its root area
+ *      (painted a known colour), and refuses a destination of another
+ *      depth with BadMatch. An Xnotify policy denying screen reads makes
+ *      it answer BadAccess, which is reported as a skip.
  *
  * The capable side - a sharp source actually shown on a transformed CRTC,
  * the hardware cursor taking over - needs an xf86 DDX on real hardware with
@@ -40,6 +44,7 @@
 #define X_XScaleSelectInput             1
 #define X_XScaleGetCrtcScanout          2
 #define X_XScaleSetCrtcScanoutSource    3
+#define X_XScaleCopyCrtcScanout         4
 #define XScaleScanoutNotifyMask         (1 << 0)
 #define XScaleScanoutCapable            (1 << 0)
 #define XScaleScanoutActive             (1 << 1)
@@ -66,7 +71,9 @@ send_ext(xcb_connection_t *c, const void *req, size_t len, int isvoid)
     parts[2].iov_len = len;
     parts[3].iov_base = NULL;
     parts[3].iov_len = -len & 3;
-    return xcb_send_request(c, 0, parts + 2, &r);
+    /* Void requests are sent checked, so xcb_request_check() gets their
+     * errors instead of the event queue. */
+    return xcb_send_request(c, isvoid ? XCB_REQUEST_CHECKED : 0, parts + 2, &r);
 }
 
 /* The reply to a request, or NULL on error. */
@@ -110,6 +117,18 @@ set_source(xcb_connection_t *c, uint32_t crtc, uint32_t drawable)
     req.xscaleReqType = X_XScaleSetCrtcScanoutSource;
     req.crtc = crtc;
     req.drawable = drawable;
+    return void_ext(c, &req, sizeof(req));
+}
+
+static int
+copy_scanout(xcb_connection_t *c, uint32_t crtc, uint32_t drawable)
+{
+    struct { uint8_t reqType, xscaleReqType; uint16_t length;
+             uint32_t crtc, drawable; int16_t sx, sy; uint16_t w, h;
+             int16_t dx, dy; } req = { 0 };
+    req.xscaleReqType = X_XScaleCopyCrtcScanout;
+    req.crtc = crtc;
+    req.drawable = drawable;      /* whole scanout to (0, 0) */
     return void_ext(c, &req, sizeof(req));
 }
 
@@ -200,6 +219,40 @@ main(void)
 
     err = set_source(c, crtc, XCB_NONE);
     CHECK(err == 0, "SetCrtcScanoutSource None accepted (%d)", err);
+
+    /* CopyCrtcScanout: paint the root one colour, copy the scanout out */
+    if (cw > 0 && ch > 0) {
+        const uint32_t colour = 0x00123456;
+        uint32_t bg = colour;
+        xcb_change_window_attributes(c, root, XCB_CW_BACK_PIXEL, &bg);
+        xcb_clear_area(c, 0, root, 0, 0, 0, 0);
+
+        pix = xcb_generate_id(c);
+        xcb_create_pixmap(c, scr->root_depth, pix, root, cw, ch);
+        err = copy_scanout(c, crtc, pix);
+        if (err == XCB_ACCESS) {
+            printf("  SKIP - CopyCrtcScanout denied by the Xnotify policy\n");
+        } else {
+            CHECK(err == 0, "CopyCrtcScanout into a root-depth pixmap (%d)", err);
+            xcb_get_image_reply_t *img = xcb_get_image_reply(c,
+                xcb_get_image(c, XCB_IMAGE_FORMAT_Z_PIXMAP, pix,
+                              cw / 2, ch / 2, 1, 1, ~0u), NULL);
+            uint32_t got = 0;
+            if (img && xcb_get_image_data_length(img) >= 4)
+                got = *(uint32_t *) xcb_get_image_data(img) & 0x00ffffff;
+            CHECK(got == colour, "copied scanout shows the root (0x%06x, "
+                  "want 0x%06x)", got, colour);
+            free(img);
+
+            xcb_pixmap_t bitmap = xcb_generate_id(c);
+            xcb_create_pixmap(c, 1, bitmap, root, 8, 8);
+            err = copy_scanout(c, crtc, bitmap);
+            CHECK(err == XCB_MATCH, "CopyCrtcScanout into a depth-1 pixmap "
+                  "refused with BadMatch (%d)", err);
+            xcb_free_pixmap(c, bitmap);
+        }
+        xcb_free_pixmap(c, pix);
+    }
 
     xcb_disconnect(c);
     printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED",

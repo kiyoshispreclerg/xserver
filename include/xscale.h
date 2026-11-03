@@ -47,6 +47,20 @@ typedef struct _XScaleScanoutFuncs {
      * itself, from scratch.
      */
     void (*source_changed)(RRCrtcPtr crtc);
+
+    /*
+     * scanout_pixmap - the buffer the CRTC scans out right now.
+     * @crtc: the CRTC, which has a mode and a scale-only transform.
+     *
+     * The pixmap holding exactly what goes to the monitor, at its
+     * physical resolution and in root orientation, or NULL when the CRTC
+     * has no such buffer (the DDX scans out of the root, or keeps its
+     * buffers to itself). XScaleCopyCrtcScanout copies from it, and
+     * renders the root through the CRTC transform when it is NULL. A DDX
+     * that later flips sources straight onto the CRTC, or frees idle
+     * shadows, only changes what this returns. Optional.
+     */
+    PixmapPtr (*scanout_pixmap)(RRCrtcPtr crtc);
 } XScaleScanoutFuncs;
 
 /*
