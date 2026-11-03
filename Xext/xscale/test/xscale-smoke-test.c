@@ -18,6 +18,8 @@
  *      (painted a known colour), and refuses a destination of another
  *      depth with BadMatch. An Xnotify policy denying screen reads makes
  *      it answer BadAccess, which is reported as a skip.
+ *   7. PresentCrtcScanout is refused with BadMatch on that CRTC, and
+ *      with BadPixmap for a pixmap that doesn't exist.
  *
  * The capable side - a sharp source actually shown on a transformed CRTC,
  * the hardware cursor taking over - needs an xf86 DDX on real hardware with
@@ -45,6 +47,7 @@
 #define X_XScaleGetCrtcScanout          2
 #define X_XScaleSetCrtcScanoutSource    3
 #define X_XScaleCopyCrtcScanout         4
+#define X_XScalePresentCrtcScanout      5
 #define XScaleScanoutNotifyMask         (1 << 0)
 #define XScaleScanoutCapable            (1 << 0)
 #define XScaleScanoutActive             (1 << 1)
@@ -129,6 +132,18 @@ copy_scanout(xcb_connection_t *c, uint32_t crtc, uint32_t drawable)
     req.xscaleReqType = X_XScaleCopyCrtcScanout;
     req.crtc = crtc;
     req.drawable = drawable;      /* whole scanout to (0, 0) */
+    return void_ext(c, &req, sizeof(req));
+}
+
+static int
+present_scanout(xcb_connection_t *c, uint32_t crtc, uint32_t pixmap)
+{
+    struct { uint8_t reqType, xscaleReqType; uint16_t length;
+             uint32_t crtc, pixmap, serial, update; } req = { 0 };
+    req.xscaleReqType = X_XScalePresentCrtcScanout;
+    req.crtc = crtc;
+    req.pixmap = pixmap;
+    req.serial = 1;
     return void_ext(c, &req, sizeof(req));
 }
 
@@ -219,6 +234,18 @@ main(void)
 
     err = set_source(c, crtc, XCB_NONE);
     CHECK(err == 0, "SetCrtcScanoutSource None accepted (%d)", err);
+
+    /* presenting on a CRTC that can't take a source */
+    pix = xcb_generate_id(c);
+    xcb_create_pixmap(c, scr->root_depth, pix, root,
+                      cw > 0 ? cw : 1, ch > 0 ? ch : 1);
+    err = present_scanout(c, crtc, pix);
+    CHECK(err == XCB_MATCH, "PresentCrtcScanout refused on a non-capable "
+          "CRTC with BadMatch (%d)", err);
+    xcb_free_pixmap(c, pix);
+    err = present_scanout(c, crtc, pix);
+    CHECK(err == XCB_PIXMAP, "PresentCrtcScanout of a freed pixmap refused "
+          "with BadPixmap (%d)", err);
 
     /* CopyCrtcScanout: paint the root one colour, copy the scanout out */
     if (cw > 0 && ch > 0) {
