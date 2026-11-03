@@ -30,6 +30,9 @@
 
 #include "driver.h"
 #include "drmmode_bo.h"
+#ifdef CONFIG_XSCALE
+#include "include/xscale.h"
+#endif
 
 /*
  * Flush the DRM event queue when full; makes space for new events.
@@ -876,6 +879,33 @@ ms_tearfree_dri_notify(drmmode_tearfree_ptr trf, uint64_t msc, uint64_t usec)
     }
 }
 
+/* What the TearFree flip that just landed (or was aborted) carried for
+ * X-SCALE: see drmmode_tearfree_rec. */
+static void
+ms_tearfree_xscale_done(xf86CrtcPtr crtc, uint64_t msc, uint64_t usec)
+{
+    drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
+    drmmode_tearfree_ptr trf = &drmmode_crtc->tearfree;
+    uint64_t token = trf->xscale_token;
+    Bool leaving = trf->xscale_leaving;
+
+    if (trf->release_fb_id) {
+        drmModeRmFB(modesettingPTR(crtc->scrn)->fd, trf->release_fb_id);
+        trf->release_fb_id = 0;
+    }
+    trf->xscale_token = 0;
+    trf->xscale_leaving = FALSE;
+#ifdef CONFIG_XSCALE
+    if (leaving)
+        XScaleScanoutLeft(crtc->randr_crtc, msc, usec);
+    if (token)
+        XScaleScanoutCopied(crtc->randr_crtc, token, msc, usec);
+#else
+    (void) token;
+    (void) leaving;
+#endif
+}
+
 static void
 ms_tearfree_flip_abort(void *data)
 {
@@ -885,6 +915,7 @@ ms_tearfree_flip_abort(void *data)
 
     trf->flip_seq = 0;
     ms_tearfree_dri_abort_all(crtc);
+    ms_tearfree_xscale_done(crtc, 0, 0);
 }
 
 static void
@@ -900,6 +931,7 @@ ms_tearfree_flip_handler(uint64_t msc, uint64_t usec, void *data)
 
     /* Notify DRI clients that their pixmaps are now visible on the display */
     ms_tearfree_dri_notify(trf, msc, usec);
+    ms_tearfree_xscale_done(crtc, msc, usec);
 }
 
 Bool
@@ -908,6 +940,7 @@ ms_do_tearfree_flip(ScreenPtr screen, xf86CrtcPtr crtc)
     drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
     drmmode_tearfree_ptr trf = &drmmode_crtc->tearfree;
     uint32_t idx = trf->back_idx, seq;
+    uint64_t token = 0;
 
     seq = ms_drm_queue_alloc(crtc, crtc, ms_tearfree_flip_handler,
                              ms_tearfree_flip_abort);
@@ -920,6 +953,12 @@ ms_do_tearfree_flip(ScreenPtr screen, xf86CrtcPtr crtc)
         goto no_flip;
     }
 
+#ifdef CONFIG_XSCALE
+    /* The X-SCALE presentations this copy carries */
+    if (drmmode_crtc_renders_transform(crtc))
+        token = XScaleScanoutCopyToken(crtc->randr_crtc);
+#endif
+
     /* Copy the damage to the back buffer and then flip it at the vblank */
     drmmode_copy_damage(crtc, trf->buf[idx].px, &trf->buf[idx].dmg, TRUE);
     if (do_queue_flip_on_crtc(screen, crtc, DRM_MODE_PAGE_FLIP_EVENT,
@@ -927,6 +966,7 @@ ms_do_tearfree_flip(ScreenPtr screen, xf86CrtcPtr crtc)
         goto no_flip;
 
     trf->flip_seq = seq;
+    trf->xscale_token = token;
     return FALSE;
 
 no_flip:
@@ -934,6 +974,11 @@ no_flip:
                "TearFree flip failed, rendering frame without TearFree\n");
     drmmode_copy_damage(crtc, trf->buf[idx ^ 1].px,
                         &trf->buf[idx ^ 1].dmg, FALSE);
+#ifdef CONFIG_XSCALE
+    /* Shown as it is copied, without TearFree */
+    if (token)
+        XScaleScanoutCopied(crtc->randr_crtc, token, 0, 0);
+#endif
     return TRUE;
 }
 #endif
