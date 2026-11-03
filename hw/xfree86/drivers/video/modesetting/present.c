@@ -372,6 +372,17 @@ ms_present_check_flip(RRCrtcPtr crtc,
                      !drmmode_crtc_per_crtc_flip_wanted(crtc->devPrivate)))
         return FALSE;
 
+    /* A CRTC with a rotation or a transform (xrandr --scale/--scale-from)
+     * scans out of a shadow or of TearFree buffers rendered through the
+     * transform, so a per-CRTC flip can never land on it. Bail out the same
+     * direct way: through no_flip, a CRTC-sized window there would be
+     * reported as a TearFree flip, and those fake flips were seen to never
+     * complete on such a CRTC, wedging GLX clients (one frame per VT
+     * switch). A plain copy completed at the next vblank is what every
+     * other window on that CRTC already gets. */
+    if (per_crtc && drmmode_crtc_is_transformed(crtc->devPrivate))
+        return FALSE;
+
     /**
      * Does the window match the pixmap exactly?
      *
