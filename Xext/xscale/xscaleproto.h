@@ -32,7 +32,8 @@
 #define X_XScaleSelectInput             1
 #define X_XScaleGetCrtcScanout          2
 #define X_XScaleSetCrtcScanoutSource    3
-#define XScaleNumberRequests            4
+#define X_XScaleCopyCrtcScanout         4
+#define XScaleNumberRequests            5
 
 /* events */
 #define XScaleScanoutNotify             0
@@ -111,6 +112,42 @@ typedef struct {
 } xXScaleSetCrtcScanoutSourceReq;
 #define sz_xXScaleSetCrtcScanoutSourceReq 16
 
+/* Copy what `crtc` scans out - the picture its monitor shows, at the
+ * monitor's resolution - into `drawable`, for screen recorders that want
+ * more than the logical root. The part (srcX, srcY, width x height), in
+ * scanout coordinates, lands at (dstX, dstY); width or height 0 means the
+ * whole scanout, of the size XScaleGetCrtcScanout reports.
+ *
+ * That is the scanout itself, compositor or not: the sharp picture when a
+ * compositor set a source, otherwise the server's magnified root, which is
+ * what the monitor shows too. A CRTC with a rotation, reflection or any
+ * transform other than a plain scale has the root's density, and its
+ * scanout is reported and copied as the root area it covers, 1:1.
+ *
+ * One GPU copy in the common case, like a CopyArea from the root; the
+ * destination is written as by CopyArea, with no GraphicsExpose events.
+ *
+ * Errors:
+ *   BadMatch   the CRTC has no mode, or the drawable is on another screen
+ *              or not of the screen's root depth;
+ *   BadAccess  the client may not read the screen (Xnotify XNOTIFY_SCREEN,
+ *              as for GetImage and CopyArea from other clients' windows).
+ */
+typedef struct {
+    CARD8   reqType;
+    CARD8   xscaleReqType;      /* X_XScaleCopyCrtcScanout */
+    CARD16  length;
+    CARD32  crtc;               /* RRCrtc */
+    CARD32  drawable;           /* Drawable */
+    INT16   srcX;
+    INT16   srcY;
+    CARD16  width;
+    CARD16  height;
+    INT16   dstX;
+    INT16   dstY;
+} xXScaleCopyCrtcScanoutReq;
+#define sz_xXScaleCopyCrtcScanoutReq 24
+
 /* ------------------------------------------------------------------ *
  *  Replies (32-byte reply header)
  * ------------------------------------------------------------------ */
@@ -129,8 +166,11 @@ typedef struct {
 } xXScaleQueryVersionReply;
 #define sz_xXScaleQueryVersionReply 32
 
-/* scanoutWidth/Height: the CRTC's physical resolution, the size a source
- * has to cover. x/y/width/height: the logical box the CRTC shows, in root
+/* scanoutWidth/Height: the size of what the CRTC scans out - its physical
+ * resolution for an untransformed or plainly scaled CRTC, the size a
+ * source has to cover and XScaleCopyCrtcScanout copies; for a rotated,
+ * reflected or otherwise transformed CRTC, the size of the root area it
+ * covers. x/y/width/height: the logical box the CRTC shows, in root
  * coordinates (its transformed footprint). Both are filled whenever the
  * CRTC has a mode, capable or not; all zero for a disabled CRTC. */
 typedef struct {

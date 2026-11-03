@@ -50,6 +50,7 @@
 #include "include/windowstr.h"
 #include "miext/extinit_priv.h"
 #include "Xext/randr/randrstr_priv.h"       /* VERIFY_RR_CRTC, rrGetScrPriv */
+#include "Xext/xnotify/xnotify.h"
 
 #include "xscaleproto.h"
 #include "include/xscale.h"
@@ -149,6 +150,25 @@ xscale_crtc_scale(RRCrtcPtr crtc, double *sx, double *sy)
     *sx = 1.0 / t->m[0][0];
     *sy = 1.0 / t->m[1][1];
     return TRUE;
+}
+
+/* The size of what the CRTC scans out, as XScaleGetCrtcScanout reports and
+ * XScaleCopyCrtcScanout copies: the mode for an untransformed or plainly
+ * scaled CRTC; for a rotated, reflected or otherwise transformed one, which
+ * has the root's density, the root area it covers. */
+static void
+xscale_scanout_size(RRCrtcPtr crtc, int *width, int *height)
+{
+    double sx, sy;
+
+    *width = *height = 0;
+    if (!crtc->mode)
+        return;
+    if (xscale_crtc_scale(crtc, &sx, &sy)) {
+        *width = crtc->mode->mode.width;
+        *height = crtc->mode->mode.height;
+    } else
+        RRCrtcGetScanoutSize(crtc, width, height);
 }
 
 /* Can the CRTC take a source now, and of what size? */
@@ -1149,8 +1169,7 @@ xscale_scanout_flags(RRCrtcPtr crtc, ClientPtr asking, int *width, int *height)
     xscale_source_ptr src = crtc->xscale_source;
     CARD8 flags = 0;
 
-    *width = crtc->mode ? crtc->mode->mode.width : 0;
-    *height = crtc->mode ? crtc->mode->mode.height : 0;
+    xscale_scanout_size(crtc, width, height);
 
     if (xscale_crtc_capable(crtc, width, height))
         flags |= XScaleScanoutCapable;
@@ -1283,6 +1302,153 @@ ProcXScaleSetCrtcScanoutSource(ClientPtr client)
                              width, height);
 }
 
+/* Copies the part (sx, sy, w x h) of the root area the CRTC covers, 1:1,
+ * into dst at (dx, dy): through a CopyArea from the root with
+ * IncludeInferiors, so the capture wraps (ours, Present's per-CRTC flips)
+ * see it like any other root copy. */
+static void
+xscale_copy_root_area(RRCrtcPtr crtc, DrawablePtr dst, int sx, int sy,
+                      int w, int h, int dx, int dy)
+{
+    ScreenPtr screen = dst->pScreen;
+    ChangeGCVal val = { .val = IncludeInferiors };
+    GCPtr gc = GetScratchGC(dst->depth, screen);
+
+    if (!gc)
+        return;
+    ChangeGC(NULL, gc, GCSubwindowMode, &val);
+    ValidateGC(dst, gc);
+    (void) (*gc->ops->CopyArea)(&screen->root->drawable, dst, gc,
+                                crtc->x + sx, crtc->y + sy, w, h, dx, dy);
+    FreeScratchGC(gc);
+}
+
+/* Renders the part (sx, sy, w x h) of a scaled CRTC's scanout from the
+ * root through the CRTC transform (bilinear) into dst at (dx, dy): what the
+ * DDX does itself to make that scanout, for a DDX that doesn't let us read
+ * its buffer. */
+static void
+xscale_render_root_scanout(RRCrtcPtr crtc, DrawablePtr dst, int sx, int sy,
+                           int w, int h, int dx, int dy)
+{
+    ScreenPtr screen = dst->pScreen;
+    XID include_inferiors = IncludeInferiors;
+    PictFormatPtr dst_format;
+    PictFilterPtr filter;
+    PicturePtr srcp, dstp;
+    int error;
+
+    dst_format = dst->type == DRAWABLE_WINDOW
+                     ? PictureWindowFormat((WindowPtr) dst)
+                     : PictureWindowFormat(screen->root);
+    srcp = CreatePicture(None, &screen->root->drawable,
+                         PictureWindowFormat(screen->root), CPSubwindowMode,
+                         &include_inferiors, serverClient, &error);
+    dstp = CreatePicture(None, dst, dst_format, 0L, NULL, serverClient, &error);
+    if (srcp && dstp) {
+        /* crtc->transform maps scanout pixels to root pixels, the CRTC's
+         * position included. */
+        SetPictureTransform(srcp, &crtc->transform);
+        filter = PictureFindFilter(screen, (char *) FilterBilinear,
+                                   strlen(FilterBilinear));
+        if (filter)
+            SetPicturePictFilter(srcp, filter, NULL, 0);
+        CompositePicture(PictOpSrc, srcp, NULL, dstp, sx, sy, 0, 0, dx, dy,
+                         w, h);
+    }
+    if (srcp)
+        FreePicture(srcp, None);
+    if (dstp)
+        FreePicture(dstp, None);
+}
+
+/* XScaleCopyCrtcScanout: what the CRTC scans out, into the client's
+ * drawable. See xscaleproto.h. */
+static int
+ProcXScaleCopyCrtcScanout(ClientPtr client)
+{
+    const XScaleScanoutFuncs *funcs;
+    RRCrtcPtr crtc;
+    DrawablePtr dst;
+    BoxRec part;
+    PixmapPtr scanout;
+    double sx, sy;
+    int width, height, err;
+
+    X_REQUEST_HEAD_STRUCT(xXScaleCopyCrtcScanoutReq);
+    X_REQUEST_FIELD_CARD32(crtc);
+    X_REQUEST_FIELD_CARD32(drawable);
+    X_REQUEST_FIELD_CARD16(srcX);
+    X_REQUEST_FIELD_CARD16(srcY);
+    X_REQUEST_FIELD_CARD16(width);
+    X_REQUEST_FIELD_CARD16(height);
+    X_REQUEST_FIELD_CARD16(dstX);
+    X_REQUEST_FIELD_CARD16(dstY);
+
+    VERIFY_RR_CRTC(stuff->crtc, crtc, DixReadAccess);
+
+    err = dixLookupDrawable(&dst, stuff->drawable, client, M_ANY,
+                            DixWriteAccess);
+    if (err != Success)
+        return err;
+
+    /* The same permission as reading the screen any other way. */
+    if (!XnotifyIsAllowed(client, XNOTIFY_SCREEN))
+        return BadAccess;
+
+    if (!crtc->mode || dst->pScreen != crtc->pScreen ||
+        dst->depth != crtc->pScreen->rootDepth)
+        return BadMatch;
+
+    /* The requested part, clipped to the scanout. */
+    xscale_scanout_size(crtc, &width, &height);
+    part.x1 = stuff->srcX;
+    part.y1 = stuff->srcY;
+    part.x2 = stuff->width ? stuff->srcX + stuff->width : width;
+    part.y2 = stuff->height ? stuff->srcY + stuff->height : height;
+    if (!stuff->width || !stuff->height)
+        part.x1 = part.y1 = 0;
+    part.x1 = max(part.x1, 0);
+    part.y1 = max(part.y1, 0);
+    part.x2 = min(part.x2, width);
+    part.y2 = min(part.y2, height);
+    if (part.x1 >= part.x2 || part.y1 >= part.y2)
+        return Success;
+
+    width = part.x2 - part.x1;
+    height = part.y2 - part.y1;
+
+    /* Only a plainly scaled CRTC has a resolution the root doesn't: every
+     * other one is its root area, 1:1. */
+    if (!xscale_crtc_scale(crtc, &sx, &sy) ||
+        (fabs(sx - 1.0) < 1e-6 && fabs(sy - 1.0) < 1e-6)) {
+        xscale_copy_root_area(crtc, dst, part.x1, part.y1, width, height,
+                              stuff->dstX, stuff->dstY);
+        return Success;
+    }
+
+    /* The buffer going to the monitor, when the DDX lets us read it: one
+     * plain copy, and exactly the picture shown, sharp or not. */
+    funcs = xscale_funcs(crtc->pScreen);
+    scanout = funcs && funcs->scanout_pixmap ? funcs->scanout_pixmap(crtc) : NULL;
+    if (scanout) {
+        GCPtr gc = GetScratchGC(dst->depth, dst->pScreen);
+
+        if (gc) {
+            ValidateGC(dst, gc);
+            (void) (*gc->ops->CopyArea)(&scanout->drawable, dst, gc,
+                                        part.x1, part.y1, width, height,
+                                        stuff->dstX, stuff->dstY);
+            FreeScratchGC(gc);
+        }
+        return Success;
+    }
+
+    xscale_render_root_scanout(crtc, dst, part.x1, part.y1, width, height,
+                               stuff->dstX, stuff->dstY);
+    return Success;
+}
+
 /* Dispatches by minor opcode. Shared by both byte orders: every request
  * handler swaps its own fields (X_REQUEST_FIELD_*). */
 static int
@@ -1295,6 +1461,7 @@ ProcXScaleDispatch(ClientPtr client)
     case X_XScaleSelectInput:           return ProcXScaleSelectInput(client);
     case X_XScaleGetCrtcScanout:        return ProcXScaleGetCrtcScanout(client);
     case X_XScaleSetCrtcScanoutSource:  return ProcXScaleSetCrtcScanoutSource(client);
+    case X_XScaleCopyCrtcScanout:       return ProcXScaleCopyCrtcScanout(client);
     default:                            return BadRequest;
     }
 }
