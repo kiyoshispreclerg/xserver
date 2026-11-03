@@ -684,6 +684,11 @@ drmmode_crtc_get_fb_id(xf86CrtcPtr crtc, uint32_t *fb_id, int *x, int *y)
 
     *fb_id = 0;
 
+    /* About to be shown: TearFree buffers parked during a per-CRTC flip
+     * come back first */
+    if (trf->parked)
+        drmmode_tearfree_unpark(crtc);
+
     if (drmmode_crtc->prime_pixmap) {
         if (!drmmode->reverse_prime_offload_mode) {
             msPixmapPrivPtr ppriv =
@@ -1552,6 +1557,52 @@ drmmode_destroy_tearfree_shadow(xf86CrtcPtr crtc)
 static PixmapPtr
 drmmode_shadow_fb_create(xf86CrtcPtr crtc, void *data, int width, int height,
                          struct gbm_bo **bo, uint32_t *fb_id);
+static Bool drmmode_tearfree_alloc(xf86CrtcPtr crtc);
+
+/*
+ * While a per-CRTC flip owns a CRTC, its TearFree buffers are not shown and
+ * not drawn into: two buffers of the CRTC's size doing nothing (16 MB at
+ * 1080p, 66 MB at 4K). Parking frees them and keeps TearFree on, so nothing
+ * else changes its mind about the CRTC (Present's flip reasons, X-SCALE's
+ * capability). Unparking makes them again, the front one filled with what
+ * the CRTC shows, before anything scans them out: an unflip asks for their
+ * fb through drmmode_crtc_get_fb_id(), X-SCALE's unflip and TearFree itself
+ * unpark first. A buffer that can't be made leaves the CRTC without
+ * TearFree until the next modeset, as when the modeset couldn't make it.
+ */
+void
+drmmode_tearfree_park(xf86CrtcPtr crtc)
+{
+    drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
+    drmmode_tearfree_ptr trf = &drmmode_crtc->tearfree;
+
+    if (trf->parked || !trf->buf[0].px || trf->flip_seq)
+        return;
+
+    drmmode_destroy_tearfree_shadow(crtc);
+    trf->back_idx = 0;
+    trf->parked = TRUE;
+}
+
+Bool
+drmmode_tearfree_unpark(xf86CrtcPtr crtc)
+{
+    drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
+    drmmode_tearfree_ptr trf = &drmmode_crtc->tearfree;
+
+    if (!trf->parked)
+        return TRUE;
+
+    if (!drmmode_tearfree_alloc(crtc)) {
+        xf86DrvMsg(crtc->scrn->scrnIndex, X_ERROR,
+                   "TearFree: can't bring back the buffers of a CRTC a "
+                   "per-CRTC flip left; TearFree is off on it until the "
+                   "next modeset\n");
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static Bool
 drmmode_create_tearfree_shadow(xf86CrtcPtr crtc)
 {
@@ -1565,6 +1616,7 @@ drmmode_create_tearfree_shadow(xf86CrtcPtr crtc)
      * their mere existence is what marks TearFree active on it. */
     if (!drmmode_crtc_tearfree_wanted(crtc)) {
         drmmode_destroy_tearfree_shadow(crtc);
+        trf->parked = FALSE;
         return TRUE;
     }
 
@@ -1596,8 +1648,22 @@ drmmode_create_tearfree_shadow(xf86CrtcPtr crtc)
         return TRUE;
     }
 
+    return drmmode_tearfree_alloc(crtc);
+}
+
+/* Fresh TearFree buffers for the CRTC's mode, the front one filled with
+ * what the CRTC shows, the back one wholly damaged. */
+static Bool
+drmmode_tearfree_alloc(xf86CrtcPtr crtc)
+{
+    drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
+    drmmode_tearfree_ptr trf = &drmmode_crtc->tearfree;
+    uint32_t w = crtc->mode.HDisplay, h = crtc->mode.VDisplay;
+    int i;
+
     /* Destroy the old mode's buffers and make new ones */
     drmmode_destroy_tearfree_shadow(crtc);
+    trf->parked = FALSE;
     for (i = 0; i < ARRAY_SIZE(trf->buf); i++) {
         trf->buf[i].px = drmmode_shadow_fb_create(crtc, NULL, w, h,
                                                   &trf->buf[i].bo,
@@ -4679,7 +4745,8 @@ drmmode_set_desired_modes(ScrnInfoPtr pScrn, drmmode_ptr drmmode, Bool set_hw,
             /* Nothing (re)builds TearFree buffers here: render through the
              * transform into them only if they already exist. */
             if (!drmmode_crtc_rotate(crtc,
-                                     drmmode_crtc->tearfree.buf[0].px != NULL))
+                                     drmmode_crtc->tearfree.buf[0].px != NULL ||
+                                     drmmode_crtc->tearfree.parked))
                 return FALSE;
         }
     }
