@@ -277,13 +277,12 @@ ms_present_check_unflip(RRCrtcPtr crtc,
         return FALSE;
 
     for (i = 0; i < config->num_crtc; i++) {
-        drmmode_crtc_private_ptr drmmode_crtc = config->crtc[i]->driver_private;
-
         /* Don't page-flip a rotated CRTC (it scans out of a rotation shadow BO,
-         * not the flip fb). For a per-CRTC flip only the target CRTC matters --
-         * a rotated *other* CRTC is untouched, so it must not veto the flip. For
-         * a whole-screen flip every CRTC shares the fb, so any rotated one does. */
-        if (drmmode_crtc->rotate_bo &&
+         * or of TearFree buffers rendered through its transform, not the flip
+         * fb). For a per-CRTC flip only the target CRTC matters -- a rotated
+         * *other* CRTC is untouched, so it must not veto the flip. For a
+         * whole-screen flip every CRTC shares the fb, so any rotated one does. */
+        if (drmmode_crtc_is_transformed(config->crtc[i]) &&
             (!per_crtc || config->crtc[i] == target))
             return FALSE;
 

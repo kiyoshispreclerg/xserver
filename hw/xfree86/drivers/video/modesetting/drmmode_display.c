@@ -1457,6 +1457,26 @@ drmmode_copy_fb(ScrnInfoPtr pScrn, drmmode_ptr drmmode)
 #endif
 }
 
+/* Does this driver render the CRTC's transformed picture itself, into its
+ * TearFree buffers? */
+Bool
+drmmode_crtc_renders_transform(xf86CrtcPtr crtc)
+{
+    return crtc->enabled && crtc->transform_in_use &&
+           (crtc->driverIsPerformingTransform & XF86DriverTransformOutput);
+}
+
+/* Does the CRTC scan out a transformed picture (a rotation shadow, or
+ * TearFree buffers rendered through the transform), which a flip of an
+ * untransformed buffer can't stand in for? */
+Bool
+drmmode_crtc_is_transformed(xf86CrtcPtr crtc)
+{
+    drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
+
+    return drmmode_crtc->rotate_bo || drmmode_crtc_renders_transform(crtc);
+}
+
 void
 drmmode_copy_damage(xf86CrtcPtr crtc, PixmapPtr dst, RegionPtr dmg, Bool empty)
 {
