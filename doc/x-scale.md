@@ -60,6 +60,7 @@ entirely.
 | 1 | `XScaleSelectInput(window, eventMask)` | (un)subscribe to `XScaleScanoutNotify`; `eventMask` 0 cancels |
 | 2 | `XScaleGetCrtcScanout(crtc)` → `(flags, scanoutWidth, scanoutHeight, x, y, width, height)` | the CRTC's physical size, its logical box in the root, and whether it can take a source |
 | 3 | `XScaleSetCrtcScanoutSource(crtc, drawable, srcX, srcY)` | feed the CRTC from `drawable`; `None` gives it back |
+| 4 | `XScaleCopyCrtcScanout(crtc, drawable, srcX, srcY, width, height, dstX, dstY)` | copy what the CRTC scans out, at the monitor's resolution, into `drawable`; for recorders (see "Recording at the monitor's resolution") |
 
 `flags`:
 
@@ -238,13 +239,53 @@ unscaled and page-flipped per CRTC by the compositor:
   the CRTC instead of copying it into the shadow. That would remove the
   last two copies.
 
+### Recording at the monitor's resolution
+
+The stitched root captures above are what every existing recorder gets,
+at logical resolution. A recorder that knows X-SCALE can offer the
+monitor's real resolution too:
+
+1. Check that the extension is there.
+2. Call `XScaleGetCrtcScanout` per CRTC. `scanoutWidth`/`scanoutHeight` is
+   the size of what the CRTC scans out, and `x`/`y`/`width`/`height` its
+   logical box. The ratio between the two is also the factor for drawing
+   the cursor, whose XFixes position stays logical.
+3. Each frame, call `XScaleCopyCrtcScanout` into a pixmap of the scanout
+   size.
+
+What gets copied is the scanout itself, compositor or not:
+
+- the sharp picture when a compositor set a source;
+- otherwise the server's magnified root, which is what the monitor shows
+  too;
+- a CRTC that isn't scaled is its root area, 1:1. A rotated or reflected
+  monitor also counts as unscaled here, because it has the root's density.
+
+To record a region across monitors with different scales, compose at the
+highest scale among them, scaling the others up. That is what KWin's
+`ScreenShot2` does with `ScreenShotNativeResolution`.
+
+The request goes through the same Xnotify permission as every other screen
+read (`XNOTIFY_SCREEN`), and answers `BadAccess` when it's denied.
+
+The cost is one GPU copy in the common case. The DDX's `scanout_pixmap`
+hook gives the buffer the CRTC scans out (the xf86 shadow), and the server
+copies from it, exactly like the `CopyArea` from the root OBS already does.
+When the DDX doesn't expose that buffer (amdgpu with TearFree), the server
+renders the root through the CRTC transform instead, still on the GPU.
+
+The request promises the scanout, not the shadow, so later work changes
+only what `scanout_pixmap` returns, and recorders don't notice:
+
+- flipping a source straight onto the CRTC: the hook returns the source;
+- freeing idle shadows: the hook returns NULL.
+
 ## Known limitations
 
 - **Screen capture:** root `GetImage` and `CopyArea` captures are stitched
-  (above). They come at logical resolution; a recorder that wants the
-  physical resolution should use the compositor's own capture path. A root
-  `CopyArea` through a clipped GC, another raster op or a plane mask still
-  reads the stale area.
+  (above) and come at logical resolution; `XScaleCopyCrtcScanout` gives the
+  monitor's resolution. A root `CopyArea` through a clipped GC, another
+  raster op or a plane mask still reads the stale area.
 - **Fullscreen unredirected windows:** a window unredirected on a CRTC with
   a source isn't shown, so the compositor must drop the source while it
   unredirects.

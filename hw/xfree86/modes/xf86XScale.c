@@ -168,9 +168,32 @@ xf86ScanoutSourceChanged(RRCrtcPtr randr_crtc)
     xf86CursorResetCursor(randr_crtc->pScreen);
 }
 
+/*
+ * xf86ScanoutPixmap - XScaleScanoutFuncs.scanout_pixmap for the xf86 modes
+ * layer.
+ *
+ * The shadow is exactly what a transformed CRTC scans out, sharp when an
+ * X-SCALE source fills it, magnified from the root otherwise, so screen
+ * recorders can copy it as is. Only an unrotated CRTC's: a rotated shadow
+ * holds scanout-oriented pixels. NULL when this layer doesn't own the
+ * CRTC's scanout buffer.
+ */
+static PixmapPtr
+xf86ScanoutPixmap(RRCrtcPtr randr_crtc)
+{
+    xf86CrtcPtr crtc = randr_crtc->devPrivate;
+
+    if (!crtc || !crtc->enabled || !crtc->transform_in_use ||
+        crtc->rotation != RR_Rotate_0 ||
+        (crtc->driverIsPerformingTransform & XF86DriverTransformOutput))
+        return NULL;
+    return crtc->rotatedPixmap;
+}
+
 static const XScaleScanoutFuncs xf86_scanout_funcs = {
     .capable = xf86ScanoutCapable,
     .source_changed = xf86ScanoutSourceChanged,
+    .scanout_pixmap = xf86ScanoutPixmap,
 };
 
 void
