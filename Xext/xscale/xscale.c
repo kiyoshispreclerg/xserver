@@ -50,6 +50,7 @@
 #include "include/windowstr.h"
 #include "miext/extinit_priv.h"
 #include "Xext/randr/randrstr_priv.h"       /* VERIFY_RR_CRTC, rrGetScrPriv */
+#include "Xext/xfixes/xfixes.h"             /* VERIFY_REGION_OR_NONE */
 #include "Xext/xnotify/xnotify.h"
 
 #include "xscaleproto.h"
@@ -65,16 +66,43 @@ Bool noXScaleExtension = FALSE;
  * report capable. */
 static const XScaleScanoutFuncs *xscale_scanout_funcs[MAXSCREENS];
 
+/* One XScalePresentCrtcScanout request: its pixmap, held (one pixmap
+ * reference) until the server is done with it, which the client learns
+ * from XScaleScanoutIdle. Referenced from every slot of the source that
+ * holds it below. */
+typedef struct {
+    struct xorg_list entry;     /* in xscale_source_rec.copied */
+    PixmapPtr pixmap;
+    XID pixmap_id;              /* as the client named it */
+    CARD32 serial;
+    uint64_t token;             /* copy token, while in `copied` */
+    int refs;
+    Bool completed;             /* XScaleScanoutComplete sent */
+} xscale_frame_rec, *xscale_frame_ptr;
+
 /* What RRCrtcRec.xscale_source points to while a client's source feeds
  * the CRTC. */
 typedef struct {
     RRCrtcPtr crtc;
     ClientPtr client;
     DrawablePtr drawable;
-    DamagePtr damage;
+    DamagePtr damage;           /* NULL for presented pixmaps */
     int src_x, src_y;
     int width, height;          /* scanout size the source was set for */
     Bool full;                  /* the next redisplay copies everything */
+
+    /* A source made of presented pixmaps (XScalePresentCrtcScanout)
+     * rather than a drawable watched with Damage. `drawable` is then the
+     * latest presented pixmap. */
+    Bool presented;
+    RegionRec pending;          /* presented updates the DDX hasn't taken */
+    xscale_frame_ptr current;   /* the latest presented: the source */
+    xscale_frame_ptr queued;    /* waits for a flip or unflip to land */
+    xscale_frame_ptr flipping;  /* the DDX's flip() of it is pending */
+    xscale_frame_ptr shown;     /* scanned out by a flip that landed */
+    xscale_frame_ptr unflipping;/* copied; completes when unflip() lands */
+    struct xorg_list copied;    /* copied, waiting for the vblank showing it */
+    uint64_t copy_token;        /* bumped for every copied frame */
 } xscale_source_rec, *xscale_source_ptr;
 
 static int xscale_event_base;
@@ -210,6 +238,8 @@ xscale_source_changed(RRCrtcPtr crtc)
     xscale_notify_scanout(crtc);
 }
 
+static void xscale_presented_release(xscale_source_ptr src);
+
 /* Forgets the CRTC's source record, without telling anyone. Clearing
  * crtc->xscale_source first makes the Damage destroy callback that
  * DamageDestroy() runs a no-op. */
@@ -222,7 +252,10 @@ xscale_source_free(RRCrtcPtr crtc)
         return;
     crtc->xscale_source = NULL;
     xscale_source_count--;
-    DamageDestroy(src->damage);
+    if (src->damage)
+        DamageDestroy(src->damage);
+    if (src->presented)
+        xscale_presented_release(src);
     free(src);
 }
 
@@ -309,6 +342,9 @@ XScaleTakeScanoutDamage(RRCrtcPtr crtc, DrawablePtr *source,
     if (src->full) {
         RegionReset(damage, &scanout);
         src->full = FALSE;
+    } else if (src->presented) {
+        /* What the presented pixmaps changed, already clipped */
+        RegionCopy(damage, &src->pending);
     } else {
         /* Damage is kept relative to the drawable's origin; the scanout
          * starts (src_x, src_y) into it. */
@@ -318,7 +354,10 @@ XScaleTakeScanoutDamage(RRCrtcPtr crtc, DrawablePtr *source,
         RegionIntersect(damage, damage, &clip);
         RegionUninit(&clip);
     }
-    DamageEmpty(src->damage);
+    if (src->presented)
+        RegionEmpty(&src->pending);
+    else
+        DamageEmpty(src->damage);
 
     *source = src->drawable;
     *src_x = src->src_x;
@@ -402,6 +441,269 @@ XScaleCrtcChanged(RRCrtcPtr crtc)
         return;
     }
     xscale_source_drop(crtc);
+}
+
+/* ------------------------------------------------------------------ *
+ *  Presented pixmaps
+ *
+ *  A compositor with buffers of its own presents each finished frame
+ *  (XScalePresentCrtcScanout). The latest one is the CRTC's source, as if
+ *  set with XScaleSetCrtcScanoutSource, so captures, the cursor and the
+ *  drop rules don't change. What changes is how it gets on screen: where
+ *  the DDX can (XScaleScanoutFuncs.flip) the pixmap is scanned out as it
+ *  is, with no copy at all; otherwise its update is copied by the DDX's
+ *  usual source path, XScaleTakeScanoutDamage() handing it out.
+ *
+ *  Each frame gets one XScaleScanoutComplete, when it is shown or
+ *  replaced, and one XScaleScanoutIdle, when nothing here holds it any
+ *  more: not the source (a copy may read it again), not on screen, not
+ *  waiting. Only one flip or unflip is in flight per CRTC; a frame
+ *  presented meanwhile waits in `queued`, where a later one replaces it.
+ * ------------------------------------------------------------------ */
+
+static Bool
+xscale_client_alive(ClientPtr client)
+{
+    return client && !client->clientGone;
+}
+
+static void
+xscale_frame_complete(xscale_source_ptr src, xscale_frame_ptr f, CARD8 mode,
+                      uint64_t msc, uint64_t ust)
+{
+    if (f->completed)
+        return;
+    f->completed = TRUE;
+    if (!xscale_client_alive(src->client))
+        return;
+
+    xXScaleScanoutCompleteEvent ev = {
+        .type = xscale_event_base + XScaleScanoutComplete,
+        .mode = mode,
+        .crtc = src->crtc->id,
+        .serial = f->serial,
+        .ustLo = (CARD32) ust,
+        .ustHi = (CARD32) (ust >> 32),
+        .mscLo = (CARD32) msc,
+        .mscHi = (CARD32) (msc >> 32),
+    };
+    WriteEventsToClient(src->client, 1, (xEvent *) &ev);
+}
+
+static xscale_frame_ptr
+xscale_frame_ref(xscale_frame_ptr f)
+{
+    if (f)
+        f->refs++;
+    return f;
+}
+
+/* Drops one slot's hold on `f`; the last one tells the client it may
+ * have the pixmap back. A frame never shown completes as skipped. */
+static void
+xscale_frame_unref(xscale_source_ptr src, xscale_frame_ptr f)
+{
+    if (!f || --f->refs > 0)
+        return;
+
+    xscale_frame_complete(src, f, XScaleCompleteModeSkip, 0, 0);
+    if (xscale_client_alive(src->client)) {
+        xXScaleScanoutIdleEvent ev = {
+            .type = xscale_event_base + XScaleScanoutIdle,
+            .crtc = src->crtc->id,
+            .serial = f->serial,
+            .pixmap = f->pixmap_id,
+        };
+        WriteEventsToClient(src->client, 1, (xEvent *) &ev);
+    }
+    dixDestroyPixmap(f->pixmap, 0);
+    free(f);
+}
+
+/* Lets go of every frame, as the source goes away. The DDX was told (or
+ * is about to be, source_changed) and puts its own buffer back. */
+static void
+xscale_presented_release(xscale_source_ptr src)
+{
+    xscale_frame_ptr f, next;
+
+    xorg_list_for_each_entry_safe(f, next, &src->copied, entry) {
+        xorg_list_del(&f->entry);
+        xscale_frame_unref(src, f);
+    }
+    xscale_frame_unref(src, src->queued);
+    xscale_frame_unref(src, src->flipping);
+    xscale_frame_unref(src, src->unflipping);
+    xscale_frame_unref(src, src->shown);
+    xscale_frame_unref(src, src->current);
+    src->queued = src->flipping = src->unflipping = NULL;
+    src->shown = src->current = NULL;
+    RegionUninit(&src->pending);
+}
+
+/* The CRTC's presented source, or NULL. */
+static xscale_source_ptr
+xscale_presented(RRCrtcPtr crtc)
+{
+    xscale_source_ptr src = crtc ? crtc->xscale_source : NULL;
+
+    return src && src->presented ? src : NULL;
+}
+
+/* A frame that goes out as a copy: it completes at the vblank showing
+ * the copy (XScaleScanoutCopied), or now when there is nothing to copy. */
+static void
+xscale_frame_copied(xscale_source_ptr src, xscale_frame_ptr f)
+{
+    if (!src->full && !RegionNotEmpty(&src->pending)) {
+        xscale_frame_complete(src, f, XScaleCompleteModeCopy, 0, 0);
+        return;
+    }
+    f->token = ++src->copy_token;
+    xorg_list_append(&f->entry, &src->copied);
+    xscale_frame_ref(f);
+}
+
+/* Puts `f`, the current frame, on screen: flipped when the DDX can,
+ * copied otherwise - after taking the CRTC back from a flipped one. */
+static void
+xscale_frame_show(RRCrtcPtr crtc, xscale_source_ptr src, xscale_frame_ptr f)
+{
+    const XScaleScanoutFuncs *funcs = xscale_funcs(crtc->pScreen);
+
+    if (funcs && funcs->flip && funcs->flip(crtc, f->pixmap)) {
+        src->flipping = xscale_frame_ref(f);
+        return;
+    }
+
+    if (src->shown) {
+        /* The DDX's own buffer has to come back first; refilled from
+         * the source, that is this frame's copy. */
+        if (funcs && funcs->unflip && funcs->unflip(crtc)) {
+            src->unflipping = xscale_frame_ref(f);
+            return;
+        }
+        /* Stuck on the flipped pixmap for now (VT switched away): */
+        xscale_frame_complete(src, f, XScaleCompleteModeSkip, 0, 0);
+        return;
+    }
+
+    xscale_frame_copied(src, f);
+}
+
+/* After a flip or unflip landed: the frame that waited for it. */
+static void
+xscale_frame_run_queued(RRCrtcPtr crtc, xscale_source_ptr src)
+{
+    xscale_frame_ptr f = src->queued;
+
+    if (!f || src->flipping || src->unflipping)
+        return;
+    src->queued = NULL;
+    xscale_frame_show(crtc, src, f);
+    xscale_frame_unref(src, f);
+}
+
+void
+XScaleFlipDone(RRCrtcPtr crtc, Bool landed, uint64_t msc, uint64_t ust)
+{
+    xscale_source_ptr src = xscale_presented(crtc);
+    xscale_frame_ptr f;
+
+    if (!src || !src->flipping)
+        return;
+
+    f = src->flipping;
+    src->flipping = NULL;
+    if (landed) {
+        xscale_frame_ptr old = src->shown;
+
+        src->shown = f;         /* keeps the flipping slot's hold */
+        xscale_frame_complete(src, f, XScaleCompleteModeFlip, msc, ust);
+        xscale_frame_unref(src, old);
+    } else
+        xscale_frame_unref(src, f);
+
+    xscale_frame_run_queued(crtc, src);
+}
+
+void
+XScaleScanoutLeft(RRCrtcPtr crtc, uint64_t msc, uint64_t ust)
+{
+    xscale_source_ptr src = xscale_presented(crtc);
+
+    if (!src || (!src->shown && !src->unflipping))
+        return;
+
+    xscale_frame_unref(src, src->shown);
+    src->shown = NULL;
+    if (src->unflipping) {
+        xscale_frame_complete(src, src->unflipping, XScaleCompleteModeCopy,
+                              msc, ust);
+        xscale_frame_unref(src, src->unflipping);
+        src->unflipping = NULL;
+    }
+    xscale_frame_run_queued(crtc, src);
+}
+
+uint64_t
+XScaleScanoutCopyToken(RRCrtcPtr crtc)
+{
+    xscale_source_ptr src = xscale_presented(crtc);
+
+    return src ? src->copy_token : 0;
+}
+
+void
+XScaleScanoutCopied(RRCrtcPtr crtc, uint64_t token, uint64_t msc,
+                    uint64_t ust)
+{
+    xscale_source_ptr src = xscale_presented(crtc);
+    xscale_frame_ptr f, next;
+
+    if (!src || !token)
+        return;
+
+    xorg_list_for_each_entry_safe(f, next, &src->copied, entry) {
+        if (f->token > token)
+            break;
+        xorg_list_del(&f->entry);
+        xscale_frame_complete(src, f, XScaleCompleteModeCopy, msc, ust);
+        xscale_frame_unref(src, f);
+    }
+}
+
+/* Makes the CRTC's source a presented one, replacing a source the same
+ * client set the other way. TRUE when it is new. */
+static Bool
+xscale_presented_source(ClientPtr client, RRCrtcPtr crtc, int width,
+                        int height, xscale_source_ptr *out)
+{
+    xscale_source_ptr src = crtc->xscale_source;
+
+    *out = NULL;
+    if (src && src->presented) {
+        *out = src;
+        return FALSE;
+    }
+
+    xscale_source_free(crtc);
+    src = calloc(1, sizeof(*src));
+    if (!src)
+        return FALSE;
+
+    src->crtc = crtc;
+    src->client = client;
+    src->width = width;
+    src->height = height;
+    src->presented = TRUE;
+    src->full = TRUE;
+    RegionNull(&src->pending);
+    xorg_list_init(&src->copied);
+    crtc->xscale_source = src;
+    xscale_source_count++;
+    *out = src;
+    return TRUE;
 }
 
 /* ------------------------------------------------------------------ *
@@ -552,6 +854,32 @@ SXScaleScanoutNotifyEvent(xXScaleScanoutNotifyEvent *from,
     cpswaps(from->scanoutWidth, to->scanoutWidth);
     cpswaps(from->scanoutHeight, to->scanoutHeight);
     cpswapl(from->timestamp, to->timestamp);
+}
+
+static void _X_COLD
+SXScaleScanoutCompleteEvent(xXScaleScanoutCompleteEvent *from,
+                            xXScaleScanoutCompleteEvent *to)
+{
+    to->type = from->type;
+    to->mode = from->mode;
+    cpswaps(from->sequenceNumber, to->sequenceNumber);
+    cpswapl(from->crtc, to->crtc);
+    cpswapl(from->serial, to->serial);
+    cpswapl(from->ustLo, to->ustLo);
+    cpswapl(from->ustHi, to->ustHi);
+    cpswapl(from->mscLo, to->mscLo);
+    cpswapl(from->mscHi, to->mscHi);
+}
+
+static void _X_COLD
+SXScaleScanoutIdleEvent(xXScaleScanoutIdleEvent *from,
+                        xXScaleScanoutIdleEvent *to)
+{
+    to->type = from->type;
+    cpswaps(from->sequenceNumber, to->sequenceNumber);
+    cpswapl(from->crtc, to->crtc);
+    cpswapl(from->serial, to->serial);
+    cpswapl(from->pixmap, to->pixmap);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1216,8 +1544,13 @@ xscale_scanout_flags(RRCrtcPtr crtc, ClientPtr asking, int *width, int *height)
 
     xscale_scanout_size(crtc, width, height);
 
-    if (xscale_crtc_capable(crtc, width, height))
+    if (xscale_crtc_capable(crtc, width, height)) {
+        const XScaleScanoutFuncs *funcs = xscale_funcs(crtc->pScreen);
+
         flags |= XScaleScanoutCapable;
+        if (funcs && funcs->can_flip && funcs->flip && funcs->can_flip(crtc))
+            flags |= XScaleScanoutFlippable;
+    }
     if (src) {
         flags |= XScaleScanoutActive;
         if (asking && src->client == asking)
@@ -1475,7 +1808,11 @@ ProcXScaleCopyCrtcScanout(ClientPtr client)
     /* The buffer going to the monitor, when the DDX lets us read it: one
      * plain copy, and exactly the picture shown, sharp or not. */
     funcs = xscale_funcs(crtc->pScreen);
-    scanout = funcs && funcs->scanout_pixmap ? funcs->scanout_pixmap(crtc) : NULL;
+    if (xscale_presented(crtc) && xscale_presented(crtc)->shown)
+        scanout = xscale_presented(crtc)->shown->pixmap;    /* flipped */
+    else
+        scanout = funcs && funcs->scanout_pixmap ? funcs->scanout_pixmap(crtc)
+                                                 : NULL;
     if (scanout) {
         GCPtr gc = GetScratchGC(dst->depth, dst->pScreen);
 
@@ -1494,6 +1831,91 @@ ProcXScaleCopyCrtcScanout(ClientPtr client)
     return Success;
 }
 
+/* XScalePresentCrtcScanout: shows a whole frame on the CRTC, flipped or
+ * copied. See xscaleproto.h, and "Presented pixmaps" above. */
+static int
+ProcXScalePresentCrtcScanout(ClientPtr client)
+{
+    RRCrtcPtr crtc;
+    PixmapPtr pixmap;
+    RegionPtr update;
+    xscale_source_ptr src;
+    xscale_frame_ptr f, old;
+    int width, height, ret;
+    Bool fresh;
+
+    X_REQUEST_HEAD_STRUCT(xXScalePresentCrtcScanoutReq);
+    X_REQUEST_FIELD_CARD32(crtc);
+    X_REQUEST_FIELD_CARD32(pixmap);
+    X_REQUEST_FIELD_CARD32(serial);
+    X_REQUEST_FIELD_CARD32(update);
+
+    VERIFY_RR_CRTC(stuff->crtc, crtc, DixSetAttrAccess);
+
+    ret = dixLookupResourceByType((void **) &pixmap, stuff->pixmap,
+                                 X11_RESTYPE_PIXMAP, client, DixReadAccess);
+    if (ret != Success) {
+        client->errorValue = stuff->pixmap;
+        return ret == BadValue ? BadPixmap : ret;
+    }
+    VERIFY_REGION_OR_NONE(update, stuff->update, client, DixReadAccess);
+
+    src = crtc->xscale_source;
+    if (src && src->client != client)
+        return BadAccess;
+
+    if (pixmap->drawable.pScreen != crtc->pScreen ||
+        pixmap->drawable.depth != crtc->pScreen->rootDepth ||
+        !xscale_crtc_capable(crtc, &width, &height) ||
+        pixmap->drawable.width != width || pixmap->drawable.height != height)
+        return BadMatch;
+
+    f = calloc(1, sizeof(*f));
+    if (!f)
+        return BadAlloc;
+    fresh = xscale_presented_source(client, crtc, width, height, &src);
+    if (!src) {
+        free(f);
+        return BadAlloc;
+    }
+
+    f->pixmap = pixmap;
+    pixmap->refcnt++;
+    f->pixmap_id = stuff->pixmap;
+    f->serial = stuff->serial;
+    f->refs = 1;                /* the `current` slot's */
+    xorg_list_init(&f->entry);
+
+    /* What the DDX's copy path takes next (XScaleTakeScanoutDamage) */
+    if (update) {
+        BoxRec all = { 0, 0, width, height };
+        RegionRec clip;
+
+        RegionInit(&clip, &all, 1);
+        RegionIntersect(&clip, &clip, update);
+        RegionUnion(&src->pending, &src->pending, &clip);
+        RegionUninit(&clip);
+    } else
+        src->full = TRUE;
+
+    old = src->current;
+    src->current = f;
+    src->drawable = &pixmap->drawable;
+    src->src_x = src->src_y = 0;
+    xscale_frame_unref(src, old);
+
+    if (fresh)
+        xscale_source_changed(crtc);
+
+    if (src->flipping || src->unflipping) {
+        old = src->queued;
+        src->queued = xscale_frame_ref(f);
+        xscale_frame_unref(src, old);
+    } else
+        xscale_frame_show(crtc, src, f);
+    return Success;
+}
+
 /* Dispatches by minor opcode. Shared by both byte orders: every request
  * handler swaps its own fields (X_REQUEST_FIELD_*). */
 static int
@@ -1507,6 +1929,7 @@ ProcXScaleDispatch(ClientPtr client)
     case X_XScaleGetCrtcScanout:        return ProcXScaleGetCrtcScanout(client);
     case X_XScaleSetCrtcScanoutSource:  return ProcXScaleSetCrtcScanoutSource(client);
     case X_XScaleCopyCrtcScanout:       return ProcXScaleCopyCrtcScanout(client);
+    case X_XScalePresentCrtcScanout:    return ProcXScalePresentCrtcScanout(client);
     default:                            return BadRequest;
     }
 }
@@ -1553,4 +1976,8 @@ XScaleExtensionInit(void)
     xscale_event_base = ext->eventBase;
     EventSwapVector[xscale_event_base + XScaleScanoutNotify] =
         (EventSwapPtr) SXScaleScanoutNotifyEvent;
+    EventSwapVector[xscale_event_base + XScaleScanoutComplete] =
+        (EventSwapPtr) SXScaleScanoutCompleteEvent;
+    EventSwapVector[xscale_event_base + XScaleScanoutIdle] =
+        (EventSwapPtr) SXScaleScanoutIdleEvent;
 }
