@@ -40,6 +40,7 @@
 #include "include/dix.h"
 #include "include/dixstruct.h"
 #include "include/extnsionst.h"
+#include "include/gcstruct.h"
 #include "include/list.h"
 #include "include/picturestr.h"
 #include "include/pixmapstr.h"
@@ -77,6 +78,8 @@ typedef struct {
 
 static int xscale_event_base;
 
+static Bool xscale_install_capture_wraps(ScreenPtr screen);
+
 /* How many CRTCs have a source, on every screen: what lets the GetImage
  * wrap below cost nothing until a compositor sets one. */
 static int xscale_source_count;
@@ -105,8 +108,14 @@ xscale_funcs(ScreenPtr pScreen)
 void
 XScaleSetScanoutFuncs(ScreenPtr pScreen, const XScaleScanoutFuncs *funcs)
 {
-    if (!xscale_protocol_screen(pScreen))
+    if (!xscale_protocol_screen(pScreen) || noXScaleExtension)
         return;
+
+    /* A screen that can have sources needs its root captures stitched;
+     * without the wraps its CRTCs are not offered as capable at all, since
+     * screen recorders would then record them frozen. */
+    if (funcs && !xscale_install_capture_wraps(pScreen))
+        funcs = NULL;
     xscale_scanout_funcs[pScreen->myNum] = funcs;
 }
 
@@ -571,27 +580,27 @@ xscale_stitch_box(RRCrtcPtr crtc, BoxPtr box)
 }
 
 /* Renders the part `part` (root coordinates) of the CRTC's logical box
- * `box` from its source, scaled down to logical size, into the result at
- * the part's offset from (req_x0, req_y0). */
-static void
-xscale_stitch_source(ScreenPtr screen, RRCrtcPtr crtc, const BoxRec *box,
-                     const BoxRec *part, int req_x0, int req_y0, int w,
-                     int depth, int bpp8, int dst_stride,
-                     unsigned long planeMask, char *pdstLine)
+ * `box` from its source, scaled down to logical size (bilinear), into
+ * `dst` at (dst_x, dst_y). The one place a source is turned back into what
+ * the root would hold, for both GetImage and CopyArea. */
+static Bool
+xscale_render_source(RRCrtcPtr crtc, const BoxRec *box, const BoxRec *part,
+                     DrawablePtr dst, int dst_x, int dst_y)
 {
+    ScreenPtr screen = dst->pScreen;
     xscale_source_ptr src = crtc->xscale_source;
     DrawablePtr source = src->drawable;
-    int pw = part->x2 - part->x1, ph = part->y2 - part->y1, error;
     XID include_inferiors = IncludeInferiors;
-    PictFormatPtr src_format;
+    PictFormatPtr src_format, dst_format;
     PictFilterPtr filter;
     PicturePtr srcp, dstp;
-    PixmapPtr scratch;
     PictTransform t;
     double sx, sy;
+    int error;
+    Bool done = FALSE;
 
     if (!xscale_crtc_scale(crtc, &sx, &sy))
-        return;
+        return FALSE;
 
     if (source->type == DRAWABLE_WINDOW)
         src_format = PictureWindowFormat((WindowPtr) source);
@@ -599,19 +608,20 @@ xscale_stitch_source(ScreenPtr screen, RRCrtcPtr crtc, const BoxRec *box,
         src_format = PictureWindowFormat(screen->root);
     else
         src_format = PictureMatchFormat(screen, source->depth, PICT_a8r8g8b8);
-    if (!src_format)
-        return;
 
-    scratch = (*screen->CreatePixmap)(screen, pw, ph, screen->rootDepth,
-                                      CREATE_PIXMAP_USAGE_SCRATCH);
-    if (!scratch)
-        return;
+    if (dst->type == DRAWABLE_WINDOW)
+        dst_format = PictureWindowFormat((WindowPtr) dst);
+    else if (dst->depth == screen->rootDepth)
+        dst_format = PictureWindowFormat(screen->root);
+    else
+        dst_format = PictureMatchFormat(screen, dst->depth, PICT_a8r8g8b8);
+
+    if (!src_format || !dst_format)
+        return FALSE;
 
     srcp = CreatePicture(None, source, src_format, CPSubwindowMode,
                          &include_inferiors, serverClient, &error);
-    dstp = CreatePicture(None, &scratch->drawable,
-                         PictureWindowFormat(screen->root), 0L, NULL,
-                         serverClient, &error);
+    dstp = CreatePicture(None, dst, dst_format, 0L, NULL, serverClient, &error);
     if (srcp && dstp) {
         /* Destination (logical) pixels -> source (physical) pixels, the
          * source starting (src_x, src_y) into its drawable. */
@@ -629,17 +639,39 @@ xscale_stitch_source(ScreenPtr screen, RRCrtcPtr crtc, const BoxRec *box,
             SetPicturePictFilter(srcp, filter, NULL, 0);
 
         CompositePicture(PictOpSrc, srcp, NULL, dstp,
-                         part->x1 - box->x1, part->y1 - box->y1, 0, 0, 0, 0,
-                         pw, ph);
-
-        xscale_read_into_result(screen, &scratch->drawable, 0, 0, pw, ph,
-                                part->x1 - req_x0, part->y1 - req_y0, w,
-                                depth, bpp8, dst_stride, planeMask, pdstLine);
+                         part->x1 - box->x1, part->y1 - box->y1, 0, 0,
+                         dst_x, dst_y,
+                         part->x2 - part->x1, part->y2 - part->y1);
+        done = TRUE;
     }
     if (srcp)
         FreePicture(srcp, None);
     if (dstp)
         FreePicture(dstp, None);
+    return done;
+}
+
+/* Renders `part` of the CRTC's logical box `box` from its source into the
+ * GetImage result at the part's offset from (req_x0, req_y0), through a
+ * scratch pixmap. */
+static void
+xscale_stitch_source(ScreenPtr screen, RRCrtcPtr crtc, const BoxRec *box,
+                     const BoxRec *part, int req_x0, int req_y0, int w,
+                     int depth, int bpp8, int dst_stride,
+                     unsigned long planeMask, char *pdstLine)
+{
+    int pw = part->x2 - part->x1, ph = part->y2 - part->y1;
+    PixmapPtr scratch;
+
+    scratch = (*screen->CreatePixmap)(screen, pw, ph, screen->rootDepth,
+                                      CREATE_PIXMAP_USAGE_SCRATCH);
+    if (!scratch)
+        return;
+
+    if (xscale_render_source(crtc, box, part, &scratch->drawable, 0, 0))
+        xscale_read_into_result(screen, &scratch->drawable, 0, 0, pw, ph,
+                                part->x1 - req_x0, part->y1 - req_y0, w,
+                                depth, bpp8, dst_stride, planeMask, pdstLine);
     dixDestroyPixmap(scratch, 0);
 }
 
@@ -746,15 +778,362 @@ xscale_get_image(DrawablePtr pDrawable, int sx, int sy, int w, int h,
     screen->GetImage = xscale_get_image;
 }
 
-/* Screen close hook: takes the GetImage wrap off again, when it is still
- * on top. */
+/* ------------------------------------------------------------------ *
+ *  Root captures: CopyArea stitching
+ *
+ *  A CopyArea from the root with IncludeInferiors is the other core way to
+ *  grab "the screen", into a pixmap, and the cheaper one: it stays on the
+ *  GPU, with no readback (OBS's XiS capture does this, gated on Present's
+ *  XiSRootCopy capability, which promises exactly that such a copy shows
+ *  what is on screen). Like GetImage it reads the stale root under a CRTC
+ *  with a source, so such a copy is split the same way: the rest from the
+ *  root by the real CopyArea, each CRTC's part rendered from its source
+ *  scaled down, straight into the destination - still all GPU work. Only
+ *  the destination is written, so the root gets no damage.
+ *
+ *  The hook is a GC wrap, the way Present does it for per-CRTC flips
+ *  (Xext/present/present_screen.c): our ops are installed only on GCs whose
+ *  subwindow mode is IncludeInferiors (the only ones that can read through
+ *  to the root's contents), so ordinary rendering keeps its own ops and
+ *  only pays the GCFuncs indirection on state changes.
+ * ------------------------------------------------------------------ */
+
+typedef struct {
+    const GCFuncs *funcs;
+    const GCOps *ops;           /* lower ops while ours are installed, else NULL */
+    GCOps wrapped_ops;          /* lower ops with CopyArea replaced */
+} xscale_gc_priv_rec, *xscale_gc_priv_ptr;
+
+static DevPrivateKeyRec xscale_gc_private_key;
+static CreateGCProcPtr xscale_orig_create_gc[MAXSCREENS];
+
+static inline xscale_gc_priv_ptr
+xscale_gc_priv(GCPtr gc)
+{
+    return dixLookupPrivate(&gc->devPrivates, &xscale_gc_private_key);
+}
+
+static void xscale_validate_gc(GCPtr gc, unsigned long changes, DrawablePtr d);
+static void xscale_change_gc(GCPtr gc, unsigned long mask);
+static void xscale_copy_gc(GCPtr src, unsigned long mask, GCPtr dst);
+static void xscale_destroy_gc(GCPtr gc);
+static void xscale_change_clip(GCPtr gc, int type, void *pvalue, int nrects);
+static void xscale_destroy_clip(GCPtr gc);
+static void xscale_copy_clip(GCPtr dst, GCPtr src);
+
+static const GCFuncs xscale_gc_funcs = {
+    xscale_validate_gc, xscale_change_gc, xscale_copy_gc, xscale_destroy_gc,
+    xscale_change_clip, xscale_destroy_clip, xscale_copy_clip
+};
+
+static RegionPtr xscale_gc_copy_area(DrawablePtr pSrc, DrawablePtr pDst,
+                                     GCPtr gc, int srcx, int srcy, int w, int h,
+                                     int dstx, int dsty);
+
+/* Restores the lower layer's funcs (and ops, if ours are installed). */
+static void
+xscale_gc_unwrap(xscale_gc_priv_ptr priv, GCPtr gc)
+{
+    gc->funcs = priv->funcs;
+    if (priv->ops)
+        gc->ops = priv->ops;
+}
+
+/* Re-installs our funcs, and our ops only on an IncludeInferiors GC. The
+ * lower layer may have switched its ops table, so the copy is refreshed. */
+static void
+xscale_gc_wrap(xscale_gc_priv_ptr priv, GCPtr gc)
+{
+    priv->funcs = gc->funcs;
+    gc->funcs = &xscale_gc_funcs;
+
+    if (gc->subWindowMode == IncludeInferiors) {
+        priv->ops = gc->ops;
+        priv->wrapped_ops = *gc->ops;
+        priv->wrapped_ops.CopyArea = xscale_gc_copy_area;
+        gc->ops = &priv->wrapped_ops;
+    } else
+        priv->ops = NULL;
+}
+
+static void
+xscale_validate_gc(GCPtr gc, unsigned long changes, DrawablePtr d)
+{
+    xscale_gc_priv_ptr priv = xscale_gc_priv(gc);
+
+    xscale_gc_unwrap(priv, gc);
+    (*gc->funcs->ValidateGC) (gc, changes, d);
+    xscale_gc_wrap(priv, gc);
+}
+
+static void
+xscale_change_gc(GCPtr gc, unsigned long mask)
+{
+    xscale_gc_priv_ptr priv = xscale_gc_priv(gc);
+
+    xscale_gc_unwrap(priv, gc);
+    (*gc->funcs->ChangeGC) (gc, mask);
+    xscale_gc_wrap(priv, gc);
+}
+
+static void
+xscale_copy_gc(GCPtr src, unsigned long mask, GCPtr dst)
+{
+    xscale_gc_priv_ptr priv = xscale_gc_priv(dst);
+
+    xscale_gc_unwrap(priv, dst);
+    (*dst->funcs->CopyGC) (src, mask, dst);
+    xscale_gc_wrap(priv, dst);
+}
+
+static void
+xscale_destroy_gc(GCPtr gc)
+{
+    xscale_gc_priv_ptr priv = xscale_gc_priv(gc);
+
+    /* The GC is freed right after; nothing to re-install. */
+    xscale_gc_unwrap(priv, gc);
+    (*gc->funcs->DestroyGC) (gc);
+}
+
+static void
+xscale_change_clip(GCPtr gc, int type, void *pvalue, int nrects)
+{
+    xscale_gc_priv_ptr priv = xscale_gc_priv(gc);
+
+    xscale_gc_unwrap(priv, gc);
+    (*gc->funcs->ChangeClip) (gc, type, pvalue, nrects);
+    xscale_gc_wrap(priv, gc);
+}
+
+static void
+xscale_destroy_clip(GCPtr gc)
+{
+    xscale_gc_priv_ptr priv = xscale_gc_priv(gc);
+
+    xscale_gc_unwrap(priv, gc);
+    (*gc->funcs->DestroyClip) (gc);
+    xscale_gc_wrap(priv, gc);
+}
+
+static void
+xscale_copy_clip(GCPtr dst, GCPtr src)
+{
+    xscale_gc_priv_ptr priv = xscale_gc_priv(dst);
+
+    xscale_gc_unwrap(priv, dst);
+    (*dst->funcs->CopyClip) (dst, src);
+    xscale_gc_wrap(priv, dst);
+}
+
+/* Merges one CopyArea's GraphicsExpose region into the running result. */
+static void
+xscale_accumulate_exposed(RegionPtr *exposed, RegionPtr r)
+{
+    if (!r)
+        return;
+    if (!*exposed) {
+        *exposed = r;
+        return;
+    }
+    RegionUnion(*exposed, *exposed, r);
+    RegionDestroy(r);
+}
+
+static PixmapPtr
+xscale_drawable_pixmap(DrawablePtr d)
+{
+    if (d->type == DRAWABLE_WINDOW)
+        return (*d->pScreen->GetWindowPixmap)((WindowPtr) d);
+    return (PixmapPtr) d;
+}
+
+/* A root IncludeInferiors copy overlapping CRTCs with a source, split as
+ * described above. Called with the GC's ops unwrapped. FALSE - nothing
+ * done, the caller does a plain CopyArea - for any other copy, and for
+ * ones the split can't reproduce exactly: a clipped GC, a raster op or
+ * plane mask other than a plain copy (the source parts are composited,
+ * which honours neither), or a destination sharing storage with the root
+ * or a source (splitting would then read what an earlier piece wrote). */
+static Bool
+xscale_copy_area_stitched(DrawablePtr pSrc, DrawablePtr pDst, GCPtr gc,
+                          int srcx, int srcy, int w, int h, int dstx, int dsty,
+                          RegionPtr *exposed)
+{
+    ScreenPtr screen = pSrc->pScreen;
+    rrScrPrivPtr pScrPriv;
+    xscale_source_ptr src;
+    PixmapPtr dst_pixmap;
+    BoxRec req, box;
+    RegionRec remaining;
+    BoxPtr rects;
+    Bool any = FALSE;
+    int nrects;
+    unsigned long full = gc->depth >= 32 ? ~0UL : (1UL << gc->depth) - 1;
+
+    if (xscale_source_count == 0 || w <= 0 || h <= 0 ||
+        pSrc->type != DRAWABLE_WINDOW || (WindowPtr) pSrc != screen->root ||
+        gc->subWindowMode != IncludeInferiors || gc->alu != GXcopy ||
+        gc->clientClip || (gc->planemask & full) != full)
+        return FALSE;
+    pScrPriv = rrGetScrPriv(screen);
+    if (!pScrPriv)
+        return FALSE;
+
+    dst_pixmap = xscale_drawable_pixmap(pDst);
+    if (dst_pixmap == (*screen->GetScreenPixmap)(screen) ||
+        dst_pixmap == (*screen->GetWindowPixmap)(screen->root))
+        return FALSE;
+
+    req.x1 = pSrc->x + srcx;
+    req.y1 = pSrc->y + srcy;
+    req.x2 = req.x1 + w;
+    req.y2 = req.y1 + h;
+
+    RegionInit(&remaining, &req, 1);
+    for (int i = 0; i < pScrPriv->numCrtcs; i++) {
+        RRCrtcPtr crtc = pScrPriv->crtcs[i];
+        RegionRec r;
+
+        if (!xscale_stitch_box(crtc, &box))
+            continue;
+        src = crtc->xscale_source;
+        if (xscale_drawable_pixmap(src->drawable) == dst_pixmap) {
+            RegionUninit(&remaining);
+            return FALSE;
+        }
+        RegionInit(&r, &box, 1);
+        if (RegionContainsRect(&remaining, &box) != rgnOUT) {
+            RegionSubtract(&remaining, &remaining, &r);
+            any = TRUE;
+        }
+        RegionUninit(&r);
+    }
+    if (!any) {
+        RegionUninit(&remaining);
+        return FALSE;
+    }
+
+    *exposed = NULL;
+
+    /* The rest from the root. Out-of-bounds source parts stay in it, so
+     * their GraphicsExpose regions come from here, exactly as from a single
+     * full copy. */
+    nrects = RegionNumRects(&remaining);
+    rects = RegionRects(&remaining);
+    for (int i = 0; i < nrects; i++) {
+        BoxPtr b = &rects[i];
+
+        xscale_accumulate_exposed(exposed,
+            (*gc->ops->CopyArea)(pSrc, pDst, gc,
+                                 b->x1 - pSrc->x, b->y1 - pSrc->y,
+                                 b->x2 - b->x1, b->y2 - b->y1,
+                                 dstx + (b->x1 - req.x1),
+                                 dsty + (b->y1 - req.y1)));
+    }
+    RegionUninit(&remaining);
+
+    /* Each CRTC's part from its source. */
+    for (int i = 0; i < pScrPriv->numCrtcs; i++) {
+        RRCrtcPtr crtc = pScrPriv->crtcs[i];
+        BoxRec part;
+
+        if (!xscale_stitch_box(crtc, &box))
+            continue;
+        part.x1 = max(box.x1, req.x1);
+        part.y1 = max(box.y1, req.y1);
+        part.x2 = min(box.x2, req.x2);
+        part.y2 = min(box.y2, req.y2);
+        if (part.x1 >= part.x2 || part.y1 >= part.y2)
+            continue;
+        /* Picture coordinates are drawable-relative, like dstx/dsty. */
+        xscale_render_source(crtc, &box, &part, pDst,
+                             dstx + (part.x1 - req.x1),
+                             dsty + (part.y1 - req.y1));
+    }
+    return TRUE;
+}
+
+static RegionPtr
+xscale_gc_copy_area(DrawablePtr pSrc, DrawablePtr pDst, GCPtr gc,
+                    int srcx, int srcy, int w, int h, int dstx, int dsty)
+{
+    xscale_gc_priv_ptr priv = xscale_gc_priv(gc);
+    RegionPtr exposed;
+
+    xscale_gc_unwrap(priv, gc);
+    if (!xscale_copy_area_stitched(pSrc, pDst, gc, srcx, srcy, w, h,
+                                   dstx, dsty, &exposed))
+        exposed = (*gc->ops->CopyArea) (pSrc, pDst, gc, srcx, srcy, w, h,
+                                        dstx, dsty);
+    xscale_gc_wrap(priv, gc);
+    return exposed;
+}
+
+/* ScreenRec.CreateGC wrap: puts our GCFuncs on every new GC. */
+static Bool
+xscale_create_gc(GCPtr gc)
+{
+    ScreenPtr screen = gc->pScreen;
+    int n = screen->myNum;
+    Bool ret;
+
+    screen->CreateGC = xscale_orig_create_gc[n];
+    ret = (*screen->CreateGC) (gc);
+    if (ret) {
+        xscale_gc_priv_ptr priv = xscale_gc_priv(gc);
+
+        priv->ops = NULL;
+        priv->funcs = gc->funcs;
+        gc->funcs = &xscale_gc_funcs;
+    }
+    xscale_orig_create_gc[n] = screen->CreateGC;
+    screen->CreateGC = xscale_create_gc;
+    return ret;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Capture wraps: install and remove
+ * ------------------------------------------------------------------ */
+
+/* Screen close hook: takes both wraps off again, where still on top. */
 static void
 xscale_close_screen(CallbackListPtr *pcbl, ScreenPtr screen, void *unused)
 {
+    int n = screen->myNum;
+
     dixScreenUnhookClose(screen, xscale_close_screen);
     if (screen->GetImage == xscale_get_image)
-        screen->GetImage = xscale_orig_get_image[screen->myNum];
-    xscale_orig_get_image[screen->myNum] = NULL;
+        screen->GetImage = xscale_orig_get_image[n];
+    if (screen->CreateGC == xscale_create_gc)
+        screen->CreateGC = xscale_orig_create_gc[n];
+    xscale_orig_get_image[n] = NULL;
+    xscale_orig_create_gc[n] = NULL;
+}
+
+/* Wraps GetImage and CreateGC on a screen that can have sources. Runs from
+ * the DDX's screen init (XScaleSetScanoutFuncs), the last moment the GC
+ * private can still be registered - before any GC exists, exactly where
+ * Present registers its own. */
+static Bool
+xscale_install_capture_wraps(ScreenPtr screen)
+{
+    int n = screen->myNum;
+
+    if (xscale_orig_get_image[n])
+        return TRUE;        /* already installed */
+
+    if (!dixPrivateKeyRegistered(&xscale_gc_private_key) &&
+        !dixRegisterPrivateKey(&xscale_gc_private_key, PRIVATE_GC,
+                               sizeof(xscale_gc_priv_rec)))
+        return FALSE;
+
+    xscale_orig_get_image[n] = screen->GetImage;
+    screen->GetImage = xscale_get_image;
+    xscale_orig_create_gc[n] = screen->CreateGC;
+    screen->CreateGC = xscale_create_gc;
+    dixScreenHookClose(screen, xscale_close_screen);
+    return TRUE;
 }
 
 /* ------------------------------------------------------------------ *
@@ -962,15 +1341,4 @@ XScaleExtensionInit(void)
     xscale_event_base = ext->eventBase;
     EventSwapVector[xscale_event_base + XScaleScanoutNotify] =
         (EventSwapPtr) SXScaleScanoutNotifyEvent;
-
-    /* Root captures of CRTCs with a source (see "GetImage stitching"). */
-    for (int s = 0; s < screenInfo.numScreens; s++) {
-        ScreenPtr screen = screenInfo.screens[s];
-
-        if (!xscale_protocol_screen(screen))
-            continue;
-        xscale_orig_get_image[screen->myNum] = screen->GetImage;
-        screen->GetImage = xscale_get_image;
-        dixScreenHookClose(screen, xscale_close_screen);
-    }
 }
