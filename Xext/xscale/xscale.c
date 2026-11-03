@@ -120,6 +120,12 @@ XScaleSetScanoutFuncs(ScreenPtr pScreen, const XScaleScanoutFuncs *funcs)
     xscale_scanout_funcs[pScreen->myNum] = funcs;
 }
 
+const XScaleScanoutFuncs *
+XScaleGetScanoutFuncs(ScreenPtr pScreen)
+{
+    return xscale_funcs(pScreen);
+}
+
 Bool
 XScaleCrtcHasSource(RRCrtcPtr crtc)
 {
@@ -318,6 +324,57 @@ XScaleTakeScanoutDamage(RRCrtcPtr crtc, DrawablePtr *source,
     *src_x = src->src_x;
     *src_y = src->src_y;
     return TRUE;
+}
+
+/* The Render format to read or write `d` with: its own for a window, the
+ * root's for anything of the root's depth, ARGB for a 32-bit pixmap. */
+static PictFormatPtr
+xscale_drawable_format(ScreenPtr screen, DrawablePtr d)
+{
+    if (d->type == DRAWABLE_WINDOW)
+        return PictureWindowFormat((WindowPtr) d);
+    if (d->depth == screen->rootDepth)
+        return PictureWindowFormat(screen->root);
+    return PictureMatchFormat(screen, d->depth, PICT_a8r8g8b8);
+}
+
+Bool
+XScaleCopyScanoutSource(RRCrtcPtr crtc, DrawablePtr dst, RegionPtr region)
+{
+    xscale_source_ptr src = crtc ? crtc->xscale_source : NULL;
+    ScreenPtr screen = dst->pScreen;
+    XID include_inferiors = IncludeInferiors;
+    PictFormatPtr src_format, dst_format;
+    PicturePtr srcp, dstp;
+    BoxPtr b;
+    int n, error;
+    Bool done = FALSE;
+
+    if (!src)
+        return FALSE;
+
+    src_format = xscale_drawable_format(screen, src->drawable);
+    dst_format = xscale_drawable_format(screen, dst);
+    if (!src_format || !dst_format)
+        return FALSE;
+
+    srcp = CreatePicture(None, src->drawable, src_format, CPSubwindowMode,
+                         &include_inferiors, serverClient, &error);
+    dstp = CreatePicture(None, dst, dst_format, 0L, NULL, serverClient, &error);
+    if (srcp && dstp) {
+        n = RegionNumRects(region);
+        b = RegionRects(region);
+        for (; n--; b++)
+            CompositePicture(PictOpSrc, srcp, NULL, dstp,
+                             b->x1 + src->src_x, b->y1 + src->src_y, 0, 0,
+                             b->x1, b->y1, b->x2 - b->x1, b->y2 - b->y1);
+        done = TRUE;
+    }
+    if (srcp)
+        FreePicture(srcp, None);
+    if (dstp)
+        FreePicture(dstp, None);
+    return done;
 }
 
 Bool
@@ -622,20 +679,8 @@ xscale_render_source(RRCrtcPtr crtc, const BoxRec *box, const BoxRec *part,
     if (!xscale_crtc_scale(crtc, &sx, &sy))
         return FALSE;
 
-    if (source->type == DRAWABLE_WINDOW)
-        src_format = PictureWindowFormat((WindowPtr) source);
-    else if (source->depth == screen->rootDepth)
-        src_format = PictureWindowFormat(screen->root);
-    else
-        src_format = PictureMatchFormat(screen, source->depth, PICT_a8r8g8b8);
-
-    if (dst->type == DRAWABLE_WINDOW)
-        dst_format = PictureWindowFormat((WindowPtr) dst);
-    else if (dst->depth == screen->rootDepth)
-        dst_format = PictureWindowFormat(screen->root);
-    else
-        dst_format = PictureMatchFormat(screen, dst->depth, PICT_a8r8g8b8);
-
+    src_format = xscale_drawable_format(screen, source);
+    dst_format = xscale_drawable_format(screen, dst);
     if (!src_format || !dst_format)
         return FALSE;
 
