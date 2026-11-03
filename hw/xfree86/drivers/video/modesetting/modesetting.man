@@ -136,6 +136,13 @@ screen's contents have not changed. It works on transformed screens too, such
 as rotated and scaled CRTCs. When PageFlip is enabled, fullscreen DRI
 applications will still have the discretion to not use tearing prevention.
 .br
+While a per-CRTC page flip (a compositor's or a fullscreen application's
+frames, or X-SCALE presented frames) owns a CRTC, its two buffers aren't
+used; after 3 seconds of that they are freed, and made again before the CRTC
+shows them. The environment variable
+.B XLIBRE_TEARFREE_PARK_MS
+sets that delay in milliseconds, and 0 keeps the buffers.
+.br
 The default is
 .B on.
 .TP

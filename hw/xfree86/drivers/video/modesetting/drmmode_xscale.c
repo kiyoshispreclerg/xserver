@@ -42,7 +42,8 @@ drmmode_xscale_capable(RRCrtcPtr randr_crtc, int *width, int *height)
     if (crtc && drmmode_crtc_renders_transform(crtc)) {
         drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
 
-        if (crtc->rotation != RR_Rotate_0 || !drmmode_crtc->tearfree.buf[0].px)
+        if (crtc->rotation != RR_Rotate_0 ||
+            (!drmmode_crtc->tearfree.buf[0].px && !drmmode_crtc->tearfree.parked))
             return FALSE;
         *width = crtc->mode.HDisplay;
         *height = crtc->mode.VDisplay;
@@ -97,7 +98,8 @@ drmmode_xscale_unflip_crtc(xf86CrtcPtr crtc)
     int i;
 
     if (!drmmode_crtc->xscale_flipped || drmmode_crtc->xscale_flip_pending ||
-        !ms_tearfree_is_active_on_crtc(crtc) || trf->flip_seq)
+        !ms_tearfree_is_active_on_crtc(crtc) || trf->flip_seq ||
+        !drmmode_tearfree_unpark(crtc))
         return FALSE;
 
     /* Nothing reached the TearFree buffers while the pixmap was shown */

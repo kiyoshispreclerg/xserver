@@ -200,6 +200,13 @@ typedef struct {
     uint32_t release_fb_id;
     Bool xscale_leaving;
     uint64_t xscale_token;
+    /* Parked: TearFree stays on, but its buffers are freed while a per-CRTC
+     * flip (Present's, or an X-SCALE presented frame) owns the CRTC, for
+     * longer than XLIBRE_TEARFREE_PARK_MS (owned_since, in ms, 0 while not
+     * owned). drmmode_tearfree_unpark() brings them back before anything
+     * shows them. See ms_tearfree_do_flips(). */
+    Bool parked;
+    CARD32 owned_since;
 } drmmode_tearfree_rec, *drmmode_tearfree_ptr;
 
 typedef struct {
@@ -410,6 +417,8 @@ int drmmode_crtc_flip(xf86CrtcPtr crtc, uint32_t fb_id, int x, int y,
 Bool drmmode_crtc_get_fb_id(xf86CrtcPtr crtc, uint32_t *fb_id, int *x, int *y);
 Bool drmmode_crtc_per_crtc_flip_wanted(xf86CrtcPtr crtc);
 Bool drmmode_crtc_tearfree_wanted(xf86CrtcPtr crtc);
+void drmmode_tearfree_park(xf86CrtcPtr crtc);
+Bool drmmode_tearfree_unpark(xf86CrtcPtr crtc);
 Bool drmmode_crtc_renders_transform(xf86CrtcPtr crtc);
 Bool drmmode_crtc_is_transformed(xf86CrtcPtr crtc);
 void drmmode_xscale_init(ScreenPtr pScreen);
