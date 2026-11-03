@@ -33,11 +33,14 @@
 #define X_XScaleGetCrtcScanout          2
 #define X_XScaleSetCrtcScanoutSource    3
 #define X_XScaleCopyCrtcScanout         4
-#define XScaleNumberRequests            5
+#define X_XScalePresentCrtcScanout      5
+#define XScaleNumberRequests            6
 
 /* events */
 #define XScaleScanoutNotify             0
-#define XScaleNumberEvents              1
+#define XScaleScanoutComplete           1
+#define XScaleScanoutIdle               2
+#define XScaleNumberEvents              3
 
 /* XScaleSelectInput event mask */
 #define XScaleScanoutNotifyMask         (1 << XScaleScanoutNotify)
@@ -46,6 +49,14 @@
 #define XScaleScanoutCapable    (1 << 0) /* a source can be set right now */
 #define XScaleScanoutActive     (1 << 1) /* some client's source is in use */
 #define XScaleScanoutMine       (1 << 2) /* ... and it is the asking client's */
+#define XScaleScanoutFlippable  (1 << 3) /* a presented pixmap would be
+                                          * flipped onto the CRTC now, not
+                                          * copied (a hint, not a promise) */
+
+/* XScaleScanoutComplete modes */
+#define XScaleCompleteModeCopy  0   /* copied into the server's own buffer */
+#define XScaleCompleteModeFlip  1   /* scanned out directly */
+#define XScaleCompleteModeSkip  2   /* replaced by a later one before shown */
 
 /* ------------------------------------------------------------------ *
  *  Requests
@@ -148,6 +159,42 @@ typedef struct {
 } xXScaleCopyCrtcScanoutReq;
 #define sz_xXScaleCopyCrtcScanoutReq 24
 
+/* Show `pixmap` on `crtc` from the next vblank on: a whole frame at
+ * the CRTC's physical resolution, as an alternative to a source the server
+ * copies by itself. The pixmap becomes the CRTC's source (replacing one
+ * the same client set), so everything a source does - screen captures,
+ * the hardware cursor, being dropped when the client goes away - applies.
+ *
+ * Where it can, the server scans the pixmap out directly (a page flip)
+ * instead of copying it; XScaleScanoutFlippable says whether it would.
+ * Otherwise it copies the part `update` (an XFixes region in scanout
+ * coordinates, None for all of it) into the buffer the CRTC scans out.
+ *
+ * The client must not draw into the pixmap again until XScaleScanoutIdle
+ * says the server is done with it: a flipped pixmap is the screen until
+ * the next one replaces it, and the latest copied one is what the server
+ * copies from again. Each request gets exactly one XScaleScanoutComplete
+ * and, later, one XScaleScanoutIdle, both sent to the requesting client
+ * only. A request sent while the previous one is not shown yet waits for
+ * it; one sent while another already waits replaces it (mode Skip).
+ *
+ * Errors:
+ *   BadMatch   the CRTC is not capable, or the pixmap is on another
+ *              screen, is not of the root's depth, or is not exactly the
+ *              scanout's size;
+ *   BadAccess  another client's source is in use;
+ *   BadPixmap, BadRegion. */
+typedef struct {
+    CARD8   reqType;
+    CARD8   xscaleReqType;      /* X_XScalePresentCrtcScanout */
+    CARD16  length;
+    CARD32  crtc;               /* RRCrtc */
+    CARD32  pixmap;             /* Pixmap */
+    CARD32  serial;             /* echoed in the events */
+    CARD32  update;             /* XFixes Region, or None */
+} xXScalePresentCrtcScanoutReq;
+#define sz_xXScalePresentCrtcScanoutReq 20
+
 /* ------------------------------------------------------------------ *
  *  Replies (32-byte reply header)
  * ------------------------------------------------------------------ */
@@ -212,5 +259,38 @@ typedef struct {
     CARD32  pad3;
 } xXScaleScanoutNotifyEvent;
 #define sz_xXScaleScanoutNotifyEvent 32
+
+/* A presented pixmap is on screen (or was skipped): `ust` is when
+ * the vblank it landed on started, in microseconds on CLOCK_MONOTONIC,
+ * and `msc` that vblank's counter; both 0 when the server doesn't know. */
+typedef struct {
+    BYTE    type;               /* XScaleEventBase + XScaleScanoutComplete */
+    CARD8   mode;               /* XScaleCompleteMode* */
+    CARD16  sequenceNumber;
+    CARD32  crtc;               /* RRCrtc */
+    CARD32  serial;
+    CARD32  ustLo;
+    CARD32  ustHi;
+    CARD32  mscLo;
+    CARD32  mscHi;
+    CARD32  pad1;
+} xXScaleScanoutCompleteEvent;
+#define sz_xXScaleScanoutCompleteEvent 32
+
+/* The server is done with a presented pixmap: the client may draw
+ * into it again. */
+typedef struct {
+    BYTE    type;               /* XScaleEventBase + XScaleScanoutIdle */
+    CARD8   pad0;
+    CARD16  sequenceNumber;
+    CARD32  crtc;               /* RRCrtc */
+    CARD32  serial;
+    CARD32  pixmap;             /* Pixmap, as named in the request */
+    CARD32  pad1;
+    CARD32  pad2;
+    CARD32  pad3;
+    CARD32  pad4;
+} xXScaleScanoutIdleEvent;
+#define sz_xXScaleScanoutIdleEvent 32
 
 #endif /* _XSERVER_XSCALEPROTO_H */
