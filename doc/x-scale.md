@@ -61,12 +61,15 @@ entirely.
 | 2 | `XScaleGetCrtcScanout(crtc)` → `(flags, scanoutWidth, scanoutHeight, x, y, width, height)` | the CRTC's physical size, its logical box in the root, and whether it can take a source |
 | 3 | `XScaleSetCrtcScanoutSource(crtc, drawable, srcX, srcY)` | feed the CRTC from `drawable`; `None` gives it back |
 | 4 | `XScaleCopyCrtcScanout(crtc, drawable, srcX, srcY, width, height, dstX, dstY)` | copy what the CRTC scans out, at the monitor's resolution, into `drawable`; for recorders (see "Recording at the monitor's resolution") |
+| 5 | `XScalePresentCrtcScanout(crtc, pixmap, serial, update)` | show a whole frame on the CRTC, flipped where the server can (see "Presenting frames") |
 
 `flags`:
 
 - `XScaleScanoutCapable` — a source can be set now;
 - `XScaleScanoutActive` — some client's source is in use;
-- `XScaleScanoutMine` — that source is the asking client's.
+- `XScaleScanoutMine` — that source is the asking client's;
+- `XScaleScanoutFlippable` — a presented frame would be flipped onto
+  the CRTC right now rather than copied. A hint, not a promise.
 
 ### When a CRTC is capable
 
@@ -113,7 +116,44 @@ source and copies it again whole.
 timestamp)` is sent on every set, replace or drop, to every client that
 selected it. The flags are the reply's, minus `XScaleScanoutMine`.
 
+### Presenting frames
+
+A compositor with a swapchain of its own can skip the source drawable and
+hand over each finished frame instead:
+`XScalePresentCrtcScanout(crtc, pixmap, serial, update)`, with `pixmap`
+exactly the scanout's size and of the root's depth.
+
+- The latest presented pixmap **is** the CRTC's source. Everything above
+  still applies to it: who may set it (`BadAccess`), when it is dropped,
+  screen captures, the hardware cursor. `XScaleSetCrtcScanoutSource(None)`
+  gives the CRTC back.
+- Where the DDX can, the pixmap is **page-flipped** onto the CRTC: it
+  becomes the screen, with no copy at all. Otherwise its `update` (an
+  XFixes region in scanout coordinates, `None` for all of it) is copied
+  like any source. A buffer allocated for scanout through DRI3, with the
+  modifiers DRI3 offers, is what can be flipped.
+- Each request gets one `XScaleScanoutComplete(crtc, serial, mode, msc,
+  ust)`, `mode` being Flip, Copy or Skip (replaced before it was shown),
+  and later one `XScaleScanoutIdle(crtc, serial, pixmap)`. Both go to the
+  requesting client only, with no selection needed.
+- Until the Idle the pixmap is the server's: a flipped one is the screen
+  until the next flip lands, and the latest one is what the server copies
+  from again. Three buffers are enough for one on screen, one queued and
+  one being drawn.
+- A request sent while the previous flip hasn't landed waits for it; a
+  later one replaces a waiting one (Skip).
+- When the source is dropped, every pixmap is reported idle at once, and
+  the DDX goes back to its own buffer at the next vblank.
+
 ## Server implementation
+
+Presented frames live in `xscale.c` too ("Presented pixmaps"): the
+frame bookkeeping, the events, and three optional `XScaleScanoutFuncs`
+(`can_flip`, `flip`, `unflip`) the DDX answers with `XScaleFlipDone()`,
+`XScaleScanoutLeft()` and, for copies, `XScaleScanoutCopyToken()` /
+`XScaleScanoutCopied()` from the flip that shows them. modesetting
+implements them on top of its per-CRTC flips (`ms_do_pageflip_crtc()`).
+
 
 - **`Xext/xscale/xscale.c`** — the protocol, and the per-CRTC source state
   (`RRCrtcRec.xscale_source`, opaque to everyone else). It tracks the
@@ -242,11 +282,14 @@ Two limits:
 The table compares a frame on a scaled 1080p output with the same output
 unscaled and page-flipped per CRTC by the compositor:
 
-| | Per-CRTC flip, unscaled | X-SCALE source |
-|---|---|---|
-| Copies per frame | 0 | 1 into the source (compositor) + 1 by the server: into the TearFree back buffer, or into the shadow without TearFree |
-| Extra VRAM | — | the source drawable (≈ 8 MB at 1080p, ≈ 33 MB at 4K); without TearFree also the shadow, the same size again |
-| Idle desktop | nothing | nothing (every copy is damage-driven) |
+| | Per-CRTC flip, unscaled | X-SCALE source | X-SCALE presented, flipped |
+|---|---|---|---|
+| Copies per frame | 0 | 1 into the source (compositor) + 1 by the server: into the TearFree back buffer, or into the shadow without TearFree | 0 |
+| Extra VRAM | — | the source drawable (≈ 8 MB at 1080p, ≈ 33 MB at 4K); without TearFree also the shadow, the same size again | none beyond the compositor's own swapchain |
+| Idle desktop | nothing | nothing (every copy is damage-driven) | nothing |
+
+A presented frame that can't be flipped costs one copy, by the server, of
+its `update` region.
 
 - Unscaled outputs keep per-CRTC flips; nothing changes for them.
 - A transformed CRTC never page-flipped anyway, because it scans out its
@@ -256,9 +299,13 @@ unscaled and page-flipped per CRTC by the compositor:
   from a source, straight into its TearFree buffers, and keeps no shadow
   for it. That holds for any `xrandr --scale`, `--rotate` or
   `--transform`, with or without X-SCALE.
-- A planned follow-up is to flip a scanout-capable source straight onto
-  the CRTC instead of copying it. That would remove the server's copy, and
-  leave the TearFree buffers idle while it lasts.
+- Presented frames are flipped onto the CRTC by modesetting when
+  TearFree renders that CRTC (the TearFree buffers then sit idle), when
+  per-CRTC flips are allowed on its output (`PerCRTCFlip`, atomic KMS),
+  and when the buffer's format and modifier can be scanned out. Leaving a
+  flipped frame is a TearFree flip of a back buffer refilled in full, so
+  no stale picture is shown. Without TearFree, or on any other DDX,
+  presented frames are copied.
 
 ### Recording at the monitor's resolution
 
@@ -299,7 +346,7 @@ renders the root through the CRTC transform instead, still on the GPU.
 The request promises the scanout, not the shadow, so later work changes
 only what `scanout_pixmap` returns, and recorders don't notice:
 
-- flipping a source straight onto the CRTC: the hook returns the source;
+- a presented frame flipped onto the CRTC is copied from directly;
 - freeing idle shadows: the hook returns NULL.
 
 ## Known limitations
