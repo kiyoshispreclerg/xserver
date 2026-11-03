@@ -18,6 +18,8 @@
 #ifndef _XSERVER_XSCALE_H
 #define _XSERVER_XSCALE_H
 
+#include <stdint.h>
+
 #include <X11/Xdefs.h>          /* Bool */
 #include "screenint.h"          /* ScreenPtr */
 #include "regionstr.h"          /* RegionPtr */
@@ -63,6 +65,44 @@ typedef struct _XScaleScanoutFuncs {
      * shadows, only changes what this returns. Optional.
      */
     PixmapPtr (*scanout_pixmap)(RRCrtcPtr crtc);
+
+    /*
+     * Presented pixmaps (XScalePresentCrtcScanout). All optional:
+     * without flip, every presented pixmap is copied like any source.
+     */
+
+    /*
+     * can_flip - would flip() be tried on this CRTC now?
+     * @crtc: a capable CRTC.
+     *
+     * Only a hint for clients (XScaleScanoutFlippable).
+     */
+    Bool (*can_flip)(RRCrtcPtr crtc);
+
+    /*
+     * flip - scan `pixmap` out directly from the next vblank on.
+     * @crtc:   a capable CRTC, with no flip of this DDX pending on it.
+     * @pixmap: the CRTC's source, of the scanout's size and the root's
+     *          depth.
+     *
+     * TRUE when the flip is queued: the DDX then calls XScaleFlipDone()
+     * exactly once. FALSE when it can't be flipped now, and nothing
+     * changed: the server copies the pixmap instead.
+     */
+    Bool (*flip)(RRCrtcPtr crtc, PixmapPtr pixmap);
+
+    /*
+     * unflip - go back from a flipped pixmap to the DDX's own buffer.
+     * @crtc: a CRTC showing a pixmap flip() put there, with no flip
+     *        pending.
+     *
+     * The DDX fills its buffer from the source in full (or from the root,
+     * when the source is gone) and shows it from the next vblank on. TRUE
+     * when that is queued: the DDX then calls XScaleScanoutLeft() once
+     * it is shown. FALSE when it can't be done now; the CRTC keeps
+     * showing the flipped pixmap.
+     */
+    Bool (*unflip)(RRCrtcPtr crtc);
 } XScaleScanoutFuncs;
 
 /*
@@ -122,6 +162,45 @@ extern _X_EXPORT Bool XScaleTakeScanoutDamage(RRCrtcPtr crtc,
  */
 extern _X_EXPORT Bool XScaleCopyScanoutSource(RRCrtcPtr crtc, DrawablePtr dst,
                                               RegionPtr region);
+
+/*
+ * XScaleFlipDone - a flip() landed, or was aborted.
+ * @crtc:   the CRTC.
+ * @landed: TRUE when the pixmap is now scanned out; FALSE when the flip
+ *          was aborted and the CRTC still shows what it showed.
+ * @msc:    the vblank it landed on, and when that started (microseconds,
+ * @ust:    CLOCK_MONOTONIC); 0 when unknown.
+ */
+extern _X_EXPORT void XScaleFlipDone(RRCrtcPtr crtc, Bool landed,
+                                     uint64_t msc, uint64_t ust);
+
+/*
+ * XScaleScanoutLeft - the CRTC no longer shows a pixmap flip() put there.
+ * @crtc: the CRTC.
+ * @msc:  as for XScaleFlipDone; 0 when unknown.
+ * @ust:
+ *
+ * Called when an unflip() is shown, and whenever the DDX left the
+ * flipped pixmap by itself (a modeset, a VT switch).
+ */
+extern _X_EXPORT void XScaleScanoutLeft(RRCrtcPtr crtc, uint64_t msc,
+                                        uint64_t ust);
+
+/*
+ * XScaleScanoutCopyToken / XScaleScanoutCopied - completing copied
+ * presentations at the vblank that shows them.
+ * @crtc:  the CRTC.
+ * @token: what XScaleScanoutCopyToken() returned when the DDX copied the
+ *         source into the buffer it is about to show.
+ * @msc:   when that buffer is shown; 0 when unknown.
+ * @ust:
+ *
+ * Every presentation copied before the token was taken completes.
+ * Tokens are never 0; 0 means nothing to complete.
+ */
+extern _X_EXPORT uint64_t XScaleScanoutCopyToken(RRCrtcPtr crtc);
+extern _X_EXPORT void XScaleScanoutCopied(RRCrtcPtr crtc, uint64_t token,
+                                          uint64_t msc, uint64_t ust);
 
 /*
  * XScaleGetCrtcScale - the hardware cursor's scale on a CRTC with a source.
