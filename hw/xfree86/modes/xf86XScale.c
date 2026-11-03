@@ -101,8 +101,13 @@ xf86RotateScanoutRedisplay(ScreenPtr pScreen, xf86CrtcPtr crtc)
         goto out;
 
     if (XScaleCopyScanoutSource(randr_crtc, &crtc->rotatedPixmap->drawable,
-                                &damage))
+                                &damage)) {
         xf86CrtcDamageFromScanout(crtc, &damage);
+        /* The shadow is what the CRTC scans out: presented pixmaps are
+         * shown from here on. No vblank to time them by at this layer. */
+        XScaleScanoutCopied(randr_crtc, XScaleScanoutCopyToken(randr_crtc),
+                            0, 0);
+    }
  out:
     RegionUninit(&damage);
 }
