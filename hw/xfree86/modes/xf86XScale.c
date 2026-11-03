@@ -26,11 +26,16 @@
  * only what was drawn into it since the last pass, and the magnification
  * is skipped for that CRTC.
  *
- * Whatever reads the shadow next (the modesetting DDX's TearFree buffers,
- * its dirty-fb notification) learns about the change the way it always
- * does: through damage on the screen pixmap over the CRTC's logical
- * bounds, the same signal the magnification path relies on. So no DDX
- * needs changes of its own.
+ * Whatever reads the scanout next (the modesetting DDX's dirty-fb
+ * notification, say) learns about the change the way it always does:
+ * through damage on the screen pixmap over the CRTC's logical bounds, the
+ * same signal the magnification path relies on.
+ *
+ * A driver that does the transform itself, into buffers of its own
+ * (XF86DriverTransformOutput, the modesetting DDX with TearFree), has no
+ * shadow here. It gets the same damage from
+ * xf86CrtcDamageFromScanoutSource() and fills its buffers with
+ * xf86CrtcTransformRedisplay(), which copies the source for such a CRTC.
  */
 
 /* Damages the screen pixmap over the logical part of the root that the
@@ -101,6 +106,71 @@ xf86RotateScanoutRedisplay(ScreenPtr pScreen, xf86CrtcPtr crtc)
  out:
     RegionUninit(&damage);
 }
+#endif /* CONFIG_XSCALE */
+
+void
+xf86CrtcDamageFromScanoutSource(xf86CrtcPtr crtc)
+{
+#ifdef CONFIG_XSCALE
+    DrawablePtr source;
+    int src_x, src_y;
+    RegionRec damage;
+
+    if (!crtc->enabled || !XScaleCrtcHasSource(crtc->randr_crtc))
+        return;
+
+    RegionNull(&damage);
+    if (XScaleTakeScanoutDamage(crtc->randr_crtc, &source, &src_x, &src_y,
+                                &damage) &&
+        RegionNotEmpty(&damage))
+        xf86CrtcDamageFromScanout(crtc, &damage);
+    RegionUninit(&damage);
+#endif
+}
+
+#ifdef CONFIG_XSCALE
+/*
+ * xf86CrtcCopyScanoutSource - xf86CrtcTransformRedisplay() for a CRTC with
+ * an X-SCALE source: copies the source's pixels that show `region` (root
+ * coordinates) into `dst_pixmap`. FALSE when the CRTC has no source.
+ */
+Bool
+xf86CrtcCopyScanoutSource(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
+                          RegionPtr region)
+{
+    BoxRec all = { 0, 0, crtc->mode.HDisplay, crtc->mode.VDisplay };
+    RegionRec scanout, clip;
+    int n = RegionNumRects(region);
+    BoxPtr b = RegionRects(region);
+
+    if (!XScaleCrtcHasSource(crtc->randr_crtc))
+        return FALSE;
+
+    /* root area -> the scanout pixels showing it */
+    RegionNull(&scanout);
+    for (; n--; b++) {
+        BoxRec box = *b;
+        RegionRec r;
+
+        pixman_f_transform_bounds(&crtc->f_framebuffer_to_crtc, &box);
+        RegionInit(&r, &box, 1);
+        RegionUnion(&scanout, &scanout, &r);
+        RegionUninit(&r);
+    }
+    RegionInit(&clip, &all, 1);
+    RegionIntersect(&scanout, &scanout, &clip);
+    RegionUninit(&clip);
+
+    if (RegionNotEmpty(&scanout))
+        XScaleCopyScanoutSource(crtc->randr_crtc, &dst_pixmap->drawable,
+                                &scanout);
+    RegionUninit(&scanout);
+    return TRUE;
+}
+
+#endif /* CONFIG_XSCALE */
+
+#ifdef CONFIG_XSCALE
 
 /*
  * xf86ScanoutCapable - XScaleScanoutFuncs.capable for the xf86 modes layer.

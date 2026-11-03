@@ -156,6 +156,25 @@ xf86CrtcDamageShadow(xf86CrtcPtr crtc)
     crtc->shadowClear = TRUE;
 }
 
+void
+xf86CrtcTransformRedisplay(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
+                           RegionPtr region)
+{
+    ScreenPtr pScreen = xf86ScrnToScreen(crtc->scrn);
+
+#ifdef CONFIG_XSCALE
+    if (xf86CrtcCopyScanoutSource(crtc, dst_pixmap, region))
+        return;
+#endif
+
+    /* The screen pixmap rather than the root window: the software cursor
+     * only pulls itself off windows it is read from (SourceValidate), and
+     * it has to stay in this picture, as in xf86RotateRedisplay(). */
+    xf86CrtcCompositeRegion(crtc, dst_pixmap,
+                            &(*pScreen->GetScreenPixmap) (pScreen)->drawable,
+                            region, TRUE);
+}
+
 static void
 xf86RotatePrepare(ScreenPtr pScreen)
 {

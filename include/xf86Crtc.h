@@ -918,6 +918,30 @@ extern _X_EXPORT void
                          Bool transform_src);
 
 /*
+ * For a driver that does a transformed CRTC's output itself
+ * (XF86DriverTransformOutput) into scanout buffers of its own, such as
+ * TearFree buffers, in place of the shadow this layer would otherwise
+ * keep for it.
+ *
+ * xf86CrtcTransformRedisplay renders `region` (root coordinates) of what
+ * the CRTC shows into `dst_pixmap`, a buffer of the mode's size: the
+ * CRTC's X-SCALE scanout source copied 1:1 when a compositor set one,
+ * the root through the CRTC transform otherwise.
+ *
+ * xf86CrtcDamageFromScanoutSource turns what was drawn into the CRTC's
+ * X-SCALE source since the last call into damage on the screen pixmap,
+ * over the root area it shows, so the driver's usual damage tracking
+ * picks it up. Call it before reading that damage. A no-op for a CRTC
+ * without a source.
+ */
+extern _X_EXPORT void
+ xf86CrtcTransformRedisplay(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
+                            RegionPtr region);
+
+extern _X_EXPORT void
+ xf86CrtcDamageFromScanoutSource(xf86CrtcPtr crtc);
+
+/*
  * Clean up any rotation data, used when a crtc is turned off
  * as well as when rotation is disabled.
  */
