@@ -123,7 +123,10 @@ selected it. The flags are the reply's, minus `XScaleScanoutMine`.
 - **`include/xscale.h`** — the DIX/DDX interface:
   - `XScaleScanoutFuncs` (`capable`, `source_changed`), which a DDX
     registers per screen with `XScaleSetScanoutFuncs()`;
-  - `XScaleTakeScanoutDamage()` for the DDX's redisplay;
+  - `XScaleGetScanoutFuncs()`, for a driver that takes over some CRTCs
+    and leaves the rest to the funcs registered before it;
+  - `XScaleTakeScanoutDamage()` and `XScaleCopyScanoutSource()` for the
+    DDX's redisplay;
   - `XScaleGetCrtcScale()` for the cursor.
 
   Every function is documented in the header.
@@ -136,11 +139,24 @@ selected it. The flags are the reply's, minus `XScaleScanoutMine`.
      (`crtc->rotatedPixmap`);
   3. damages the screen pixmap over the CRTC's logical bounds. That is the
      same signal the magnification path gives, so whatever reads the
-     shadow next (modesetting's TearFree buffers, its dirty-fb
-     notification) needs no change.
+     shadow next (modesetting's dirty-fb notification) needs no change.
 
   Dropping the source damages the whole shadow, so it is filled from the
   root again.
+
+  For a driver that renders a transformed CRTC into scanout buffers of its
+  own instead (`XF86DriverTransformOutput`), the layer exports the same two
+  steps: `xf86CrtcDamageFromScanoutSource()` (step 3) and
+  `xf86CrtcTransformRedisplay()`, which renders a region of the CRTC into
+  the driver's buffer, from the source 1:1 or from the root through the
+  transform.
+- **`hw/xfree86/drivers/video/modesetting/`** — with TearFree on a
+  transformed CRTC, modesetting renders it straight into its TearFree back
+  buffer (`drmmode_crtc_rotate()`), and the modes layer keeps no shadow for
+  it. Its own `XScaleScanoutFuncs` (`drmmode_xscale.c`) handle those
+  CRTCs: a source is copied straight into the TearFree back buffer, and
+  `scanout_pixmap` is the TearFree front buffer. Every other CRTC goes to
+  the modes layer's funcs.
 
 ### Screen capture
 
@@ -188,7 +204,8 @@ keeps Present's `XiSRootCopy` promise true with X-SCALE.
   that uses the modes layer's shadow.
 - **Not capable:** a DDX that performs transforms on its own scanout
   buffers (`driverIsPerformingTransform & XF86DriverTransformOutput`, e.g.
-  amdgpu with TearFree), Xvfb, Xephyr and Xwayland. All of these keep the
+  amdgpu with TearFree) and doesn't register its own funcs the way
+  modesetting does, Xvfb, Xephyr and Xwayland. All of these keep the
   stock magnification: correct, but blurry.
 - **GPU screens** (PRIME secondaries) are never capable.
 
@@ -227,17 +244,21 @@ unscaled and page-flipped per CRTC by the compositor:
 
 | | Per-CRTC flip, unscaled | X-SCALE source |
 |---|---|---|
-| Copies per frame | 0 | 1 into the source (compositor) + 1 into the shadow + 1 into the TearFree buffer, if TearFree is on |
-| Extra VRAM | — | the source drawable + the shadow (≈ 16 MB at 1080p, ≈ 66 MB at 4K) |
+| Copies per frame | 0 | 1 into the source (compositor) + 1 by the server: into the TearFree back buffer, or into the shadow without TearFree |
+| Extra VRAM | — | the source drawable (≈ 8 MB at 1080p, ≈ 33 MB at 4K); without TearFree also the shadow, the same size again |
 | Idle desktop | nothing | nothing (every copy is damage-driven) |
 
 - Unscaled outputs keep per-CRTC flips; nothing changes for them.
 - A transformed CRTC never page-flipped anyway, because it scans out its
-  shadow. Compared with the stock magnification, X-SCALE replaces a
-  bilinear scaling blit with a 1:1 copy.
+  shadow or its TearFree buffers. Compared with the stock magnification,
+  X-SCALE replaces a bilinear scaling blit with a 1:1 copy.
+- With TearFree, modesetting renders a transformed CRTC, from the root or
+  from a source, straight into its TearFree buffers, and keeps no shadow
+  for it. That holds for any `xrandr --scale`, `--rotate` or
+  `--transform`, with or without X-SCALE.
 - A planned follow-up is to flip a scanout-capable source straight onto
-  the CRTC instead of copying it into the shadow. That would remove the
-  last two copies.
+  the CRTC instead of copying it. That would remove the server's copy, and
+  leave the TearFree buffers idle while it lasts.
 
 ### Recording at the monitor's resolution
 
@@ -269,7 +290,8 @@ The request goes through the same Xnotify permission as every other screen
 read (`XNOTIFY_SCREEN`), and answers `BadAccess` when it's denied.
 
 The cost is one GPU copy in the common case. The DDX's `scanout_pixmap`
-hook gives the buffer the CRTC scans out (the xf86 shadow), and the server
+hook gives the buffer the CRTC scans out (the xf86 shadow, or
+modesetting's TearFree front buffer), and the server
 copies from it, exactly like the `CopyArea` from the root OBS already does.
 When the DDX doesn't expose that buffer (amdgpu with TearFree), the server
 renders the root through the CRTC transform instead, still on the GPU.
