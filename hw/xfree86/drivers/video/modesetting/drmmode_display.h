@@ -193,6 +193,13 @@ typedef struct {
     struct xorg_list dri_flip_list;
     uint32_t back_idx;
     uint32_t flip_seq;
+    /* X-SCALE (Xext/xscale/xscale.c): when the pending flip lands, release
+     * this fb (the presented pixmap an unflip leaves), tell X-SCALE the
+     * CRTC left it (xscale_leaving), and complete the presentations whose
+     * copy it carries (xscale_token, 0 for none). */
+    uint32_t release_fb_id;
+    Bool xscale_leaving;
+    uint64_t xscale_token;
 } drmmode_tearfree_rec, *drmmode_tearfree_ptr;
 
 typedef struct {
