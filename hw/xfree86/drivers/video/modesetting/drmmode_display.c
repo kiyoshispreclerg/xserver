@@ -1767,6 +1767,13 @@ drmmode_set_mode_major(xf86CrtcPtr crtc, DisplayModePtr mode,
             drmModeRmFB(drmmode->fd, drmmode_crtc->present_flip_fb_id);
             drmmode_crtc->present_flip_fb_id = 0;
         }
+#ifdef CONFIG_XSCALE
+        /* That fb may have been an X-SCALE presented pixmap */
+        if (drmmode_crtc->xscale_flipped) {
+            drmmode_crtc->xscale_flipped = FALSE;
+            XScaleScanoutLeft(crtc->randr_crtc, 0, 0);
+        }
+#endif
     }
 
  done:
