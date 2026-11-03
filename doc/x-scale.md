@@ -161,6 +161,26 @@ fills the CRTC's logical box with its source, scaled down to logical size
 - It chains with Present's equivalent for per-CRTC flips
   (`present_flip_getimage()`).
 
+The other core way to grab the screen is a `CopyArea` from the root with
+`IncludeInferiors` into a pixmap. It stays on the GPU with no readback, and
+it is what OBS's XiS capture uses when Present advertises
+`XiSRootCopy`. That copy is split the same way, through a GC wrap modelled
+on Present's:
+
+- the rest of the root comes from the real `CopyArea`;
+- each CRTC's part is composited from its source, scaled down, straight
+  into the destination, so everything stays GPU work.
+
+The split only happens when it reproduces a plain copy exactly: an
+unclipped GC, `GXcopy`, all planes, and a destination that doesn't share
+storage with the root or a source. Any other copy is left alone.
+
+Both wraps are installed from the DDX's screen init, only on screens that
+can have sources, because the GC private has to be registered before any
+GC exists. A screen where installing them fails never reports a CRTC
+capable, so a source can never leave captures stale. That is also what
+keeps Present's `XiSRootCopy` promise true with X-SCALE.
+
 ### DDX coverage
 
 - **Capable:** modesetting (with or without TearFree), and any xf86 DDX
@@ -220,11 +240,11 @@ unscaled and page-flipped per CRTC by the compositor:
 
 ## Known limitations
 
-- **Screen capture:** root `GetImage` captures are stitched (above). A
-  `CopyArea` from the root with `IncludeInferiors`, the other core way to
-  grab the screen, is not, so it still reads the stale area. Captures come
-  at logical resolution; a recorder that wants the physical resolution
-  should use the compositor's own capture path.
+- **Screen capture:** root `GetImage` and `CopyArea` captures are stitched
+  (above). They come at logical resolution; a recorder that wants the
+  physical resolution should use the compositor's own capture path. A root
+  `CopyArea` through a clipped GC, another raster op or a plane mask still
+  reads the stale area.
 - **Fullscreen unredirected windows:** a window unredirected on a CRTC with
   a source isn't shown, so the compositor must drop the source while it
   unredirects.
