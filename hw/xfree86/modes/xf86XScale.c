@@ -33,6 +33,31 @@
  * needs changes of its own.
  */
 
+/* Damages the screen pixmap over the logical part of the root that the
+ * scanout pixels in `scanout` show. */
+static void
+xf86CrtcDamageFromScanout(xf86CrtcPtr crtc, RegionPtr scanout)
+{
+    ScreenPtr pScreen = xf86ScrnToScreen(crtc->scrn);
+    RegionRec fb_damage;
+    int n = RegionNumRects(scanout);
+    BoxPtr b = RegionRects(scanout);
+
+    RegionNull(&fb_damage);
+    for (; n--; b++) {
+        BoxRec fb_box = *b;
+        RegionRec r;
+
+        pixman_f_transform_bounds(&crtc->f_crtc_to_framebuffer, &fb_box);
+        RegionInit(&r, &fb_box, 1);
+        RegionUnion(&fb_damage, &fb_damage, &r);
+        RegionUninit(&r);
+    }
+    DamageDamageRegion(&(*pScreen->GetScreenPixmap) (pScreen)->drawable,
+                       &fb_damage);
+    RegionUninit(&fb_damage);
+}
+
 /*
  * xf86RotateScanoutRedisplay - copy a CRTC's X-SCALE source into its shadow.
  * @pScreen: the screen.
@@ -48,12 +73,8 @@ xf86RotateScanoutRedisplay(ScreenPtr pScreen, xf86CrtcPtr crtc)
 {
     RRCrtcPtr randr_crtc = crtc->randr_crtc;
     DrawablePtr source;
-    int src_x, src_y, error, n;
-    RegionRec damage, fb_damage;
-    PicturePtr src, dst;
-    PictFormatPtr src_format;
-    BoxPtr b;
-    XID include_inferiors = IncludeInferiors;
+    int src_x, src_y;
+    RegionRec damage;
 
     if (!crtc->enabled || !crtc->rotatedPixmap ||
         !XScaleCrtcHasSource(randr_crtc))
@@ -74,51 +95,9 @@ xf86RotateScanoutRedisplay(ScreenPtr pScreen, xf86CrtcPtr crtc)
     if (!RegionNotEmpty(&damage))
         goto out;
 
-    if (source->type == DRAWABLE_WINDOW)
-        src_format = PictureWindowFormat((WindowPtr) source);
-    else if (source->depth == pScreen->rootDepth)
-        src_format = PictureWindowFormat(pScreen->root);
-    else
-        src_format = PictureMatchFormat(pScreen, source->depth, PICT_a8r8g8b8);
-    if (!src_format)
-        goto out;
-
-    src = CreatePicture(None, source, src_format, CPSubwindowMode,
-                        &include_inferiors, serverClient, &error);
-    if (!src)
-        goto out;
-    dst = CreatePicture(None, &crtc->rotatedPixmap->drawable,
-                        PictureWindowFormat(pScreen->root), 0L, NULL,
-                        serverClient, &error);
-    if (!dst) {
-        FreePicture(src, None);
-        goto out;
-    }
-
-    RegionNull(&fb_damage);
-    n = RegionNumRects(&damage);
-    b = RegionRects(&damage);
-    while (n--) {
-        BoxRec fb_box = *b;
-        RegionRec r;
-
-        CompositePicture(PictOpSrc, src, NULL, dst,
-                         b->x1 + src_x, b->y1 + src_y, 0, 0, b->x1, b->y1,
-                         b->x2 - b->x1, b->y2 - b->y1);
-
-        /* scanout pixels -> the logical part of the root they show */
-        pixman_f_transform_bounds(&crtc->f_crtc_to_framebuffer, &fb_box);
-        RegionInit(&r, &fb_box, 1);
-        RegionUnion(&fb_damage, &fb_damage, &r);
-        RegionUninit(&r);
-        b++;
-    }
-    FreePicture(src, None);
-    FreePicture(dst, None);
-
-    DamageDamageRegion(&(*pScreen->GetScreenPixmap) (pScreen)->drawable,
-                       &fb_damage);
-    RegionUninit(&fb_damage);
+    if (XScaleCopyScanoutSource(randr_crtc, &crtc->rotatedPixmap->drawable,
+                                &damage))
+        xf86CrtcDamageFromScanout(crtc, &damage);
  out:
     RegionUninit(&damage);
 }
