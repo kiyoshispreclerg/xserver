@@ -249,6 +249,11 @@ typedef struct {
      * copy). */
     WindowPtr present_flip_window;
 
+    /* An X-SCALE presented pixmap is flipped onto this CRTC (its fb is
+     * present_flip_fb_id), and whether that flip is still pending. */
+    Bool xscale_flipped;
+    Bool xscale_flip_pending;
+
     PixmapPtr prime_pixmap;
     PixmapPtr prime_pixmap_back;
     unsigned prime_pixmap_x;
