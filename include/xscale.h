@@ -74,6 +74,17 @@ extern _X_EXPORT void XScaleSetScanoutFuncs(ScreenPtr pScreen,
                                             const XScaleScanoutFuncs *funcs);
 
 /*
+ * XScaleGetScanoutFuncs - what a screen's DDX registered so far.
+ * @pScreen: the screen.
+ *
+ * NULL when nothing is. A driver that handles some CRTCs itself and leaves
+ * the rest to a lower layer (the xf86 modes layer) registers its own funcs
+ * and calls these for the CRTCs it doesn't handle.
+ */
+extern _X_EXPORT const XScaleScanoutFuncs *
+XScaleGetScanoutFuncs(ScreenPtr pScreen);
+
+/*
  * XScaleCrtcHasSource - is a client's source feeding this CRTC?
  * @crtc: the CRTC, or NULL (FALSE).
  */
@@ -96,6 +107,19 @@ extern _X_EXPORT Bool XScaleTakeScanoutDamage(RRCrtcPtr crtc,
                                               DrawablePtr *source,
                                               int *src_x, int *src_y,
                                               RegionPtr damage);
+
+/*
+ * XScaleCopyScanoutSource - copy part of a CRTC's source into a buffer.
+ * @crtc:   the CRTC.
+ * @dst:    a drawable of the scanout's size, on the CRTC's screen.
+ * @region: the part to copy, in scanout coordinates.
+ *
+ * Copies 1:1, on the GPU when the screen is accelerated. Doesn't touch
+ * the accumulated damage. TRUE iff the CRTC has a source and the copy was
+ * issued.
+ */
+extern _X_EXPORT Bool XScaleCopyScanoutSource(RRCrtcPtr crtc, DrawablePtr dst,
+                                              RegionPtr region);
 
 /*
  * XScaleGetCrtcScale - the hardware cursor's scale on a CRTC with a source.
