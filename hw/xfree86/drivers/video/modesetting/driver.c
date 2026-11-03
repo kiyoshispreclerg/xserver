@@ -772,6 +772,8 @@ ms_tearfree_update_damages(ScreenPtr pScreen)
         if (trf->buf[0].px) {
             for (i = 0; i < ARRAY_SIZE(trf->buf); i++)
                 RegionUnion(&trf->buf[i].dmg, &trf->buf[i].dmg, &region);
+        } else if (trf->parked) {
+            /* Nothing to track: refilled in full when unparked */
         } else {
             /* Just notify the kernel of the damages if TearFree isn't used on
              * this CRTC, against whatever it actually scans out (rotation
@@ -789,6 +791,25 @@ ms_tearfree_update_damages(ScreenPtr pScreen)
     }
     DamageEmpty(ms->damage);
 }
+
+#ifdef GLAMOR
+/* How long a per-CRTC flip must own a CRTC before its TearFree buffers are
+ * parked: XLIBRE_TEARFREE_PARK_MS, 3000 by default, 0 never parks. */
+static int
+ms_tearfree_park_ms(void)
+{
+    static int ms = -1;
+
+    if (ms < 0) {
+        const char *v = getenv("XLIBRE_TEARFREE_PARK_MS");
+
+        ms = v ? atoi(v) : 3000;
+        if (ms < 0)
+            ms = 0;
+    }
+    return ms;
+}
+#endif
 
 static void
 ms_tearfree_do_flips(ScreenPtr pScreen)
@@ -812,6 +833,27 @@ ms_tearfree_do_flips(ScreenPtr pScreen)
             ms_tearfree_dri_abort_all(crtc);
             continue;
         }
+
+        /* Buffers a per-CRTC flip leaves idle are parked after a while, and
+         * brought back once the CRTC is TearFree's again (drmmode_tearfree_
+         * park()). The wait keeps a video that flips on and off from
+         * reallocating them every time. */
+        if (drmmode_crtc->present_flip_fb_id) {
+            CARD32 now = GetTimeInMillis();
+
+            if (!trf->owned_since)
+                trf->owned_since = now ? now : 1;
+            else if (ms_tearfree_park_ms() > 0 &&
+                     now - trf->owned_since >= (CARD32) ms_tearfree_park_ms())
+                drmmode_tearfree_park(crtc);
+        } else {
+            trf->owned_since = 0;
+            if (trf->parked && !ms->drmmode.present_flipping &&
+                !ms->drmmode.dri2_flipping)
+                drmmode_tearfree_unpark(crtc);
+        }
+        if (trf->parked || !trf->buf[0].px)
+            continue;
 
         /* Skip if the last flip is still pending, a DRI client is flipping, or
          * there isn't any damage on the front buffer. Also skip a CRTC whose
