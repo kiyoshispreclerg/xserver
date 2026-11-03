@@ -141,6 +141,26 @@ selected it. The flags are the reply's, minus `XScaleScanoutMine`.
   Dropping the source damages the whole shadow, so it is filled from the
   root again.
 
+### Screen capture
+
+A CRTC with a source shows the source, not the part of the root it covers.
+The compositor draws only into the source, so that part of the screen
+pixmap holds whatever was last left there. Recorders that read "the
+screen" with a root `GetImage` (`XGetImage`, `XShmGetImage`; OBS,
+`ffmpeg -f x11grab`) would record it frozen.
+
+To prevent that, `xscale.c` wraps `ScreenRec.GetImage`. A root `ZPixmap`
+capture that overlaps such a CRTC reads the rest of the root as usual, and
+fills the CRTC's logical box with its source, scaled down to logical size
+(bilinear): the picture the CRTC shows, at the root's resolution.
+
+- It only reads: nothing on screen changes, so there is no damage and no
+  feedback with XDamage-driven recorders.
+- It costs nothing while no CRTC has a source, and otherwise only while
+  something captures.
+- It chains with Present's equivalent for per-CRTC flips
+  (`present_flip_getimage()`).
+
 ### DDX coverage
 
 - **Capable:** modesetting (with or without TearFree), and any xf86 DDX
@@ -200,9 +220,11 @@ unscaled and page-flipped per CRTC by the compositor:
 
 ## Known limitations
 
-- **Screen capture:** root `GetImage` captures read the logical root,
-  which on a CRTC with a source holds whatever the compositor last left
-  there. Recorders should use the compositor's own capture path.
+- **Screen capture:** root `GetImage` captures are stitched (above). A
+  `CopyArea` from the root with `IncludeInferiors`, the other core way to
+  grab the screen, is not, so it still reads the stale area. Captures come
+  at logical resolution; a recorder that wants the physical resolution
+  should use the compositor's own capture path.
 - **Fullscreen unredirected windows:** a window unredirected on a CRTC with
   a source isn't shown, so the compositor must drop the source while it
   unredirects.

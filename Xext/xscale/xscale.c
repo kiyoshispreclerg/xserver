@@ -31,13 +31,18 @@
 #include <X11/Xmd.h>
 #include <X11/Xproto.h>
 
+#include <X11/extensions/render.h>
+
 #include "dix/dix_priv.h"
 #include "dix/request_priv.h"
+#include "dix/screen_hooks_priv.h"
 #include "include/damage.h"
 #include "include/dix.h"
 #include "include/dixstruct.h"
 #include "include/extnsionst.h"
 #include "include/list.h"
+#include "include/picturestr.h"
+#include "include/pixmapstr.h"
 #include "include/randrstr.h"
 #include "include/resource.h"
 #include "include/scrnintstr.h"
@@ -71,6 +76,10 @@ typedef struct {
 } xscale_source_rec, *xscale_source_ptr;
 
 static int xscale_event_base;
+
+/* How many CRTCs have a source, on every screen: what lets the GetImage
+ * wrap below cost nothing until a compositor sets one. */
+static int xscale_source_count;
 
 static void xscale_notify_scanout(RRCrtcPtr crtc);
 
@@ -177,6 +186,7 @@ xscale_source_free(RRCrtcPtr crtc)
     if (!src)
         return;
     crtc->xscale_source = NULL;
+    xscale_source_count--;
     DamageDestroy(src->damage);
     free(src);
 }
@@ -202,6 +212,7 @@ xscale_source_damage_destroy(DamagePtr damage, void *closure)
     if (crtc->xscale_source != src)
         return;             /* already being freed by xscale_source_free() */
     crtc->xscale_source = NULL;
+    xscale_source_count--;
     free(src);
     xscale_source_changed(crtc);
 }
@@ -238,6 +249,7 @@ xscale_source_set(ClientPtr client, RRCrtcPtr crtc, DrawablePtr drawable,
     src->height = height;
     src->full = TRUE;
     crtc->xscale_source = src;
+    xscale_source_count++;
 
     xscale_source_changed(crtc);
     return Success;
@@ -488,6 +500,264 @@ xscale_client_state(CallbackListPtr *pcbl, void *unused, void *calldata)
 }
 
 /* ------------------------------------------------------------------ *
+ *  Root captures: GetImage stitching
+ *
+ *  A CRTC with a source shows the source, not the part of the root it
+ *  covers: the compositor draws only into the source, so that part of the
+ *  screen pixmap holds whatever it last left there. Screen recorders read
+ *  "the screen" with a root GetImage (XGetImage, XShmGetImage), so without
+ *  this they would record a frozen picture of every output with a source.
+ *
+ *  So a root capture that overlaps such a CRTC reads the rest of the root
+ *  as usual and fills the CRTC's logical box with its source, scaled down
+ *  to logical size (bilinear) - the same picture the CRTC shows, at the
+ *  resolution of the root the recorder asked about. Reads only: nothing on
+ *  screen is touched, so no damage and no feedback with XDamage-driven
+ *  recorders, and the cost is paid only while something captures. Same
+ *  approach as Present's for per-CRTC page flips (present_flip_getimage()
+ *  in Xext/present/present_scmd.c), and it chains with it: the rest of the
+ *  root is read through whatever GetImage was below this one.
+ * ------------------------------------------------------------------ */
+
+static GetImageProcPtr xscale_orig_get_image[MAXSCREENS];
+
+/* Reads sw x sh at (src_sx, src_sy) of `src` with the screen's current
+ * (unwrapped) GetImage into the ZPixmap result at column dx, row dy of a
+ * `w`-wide result with `dst_stride` bytes per row. */
+static void
+xscale_read_into_result(ScreenPtr screen, DrawablePtr src,
+                        int src_sx, int src_sy, int sw, int sh,
+                        int dx, int dy, int w, int depth, int bpp8,
+                        int dst_stride, unsigned long planeMask,
+                        char *pdstLine)
+{
+    int tmp_stride;
+    char *tmp;
+
+    if (dx == 0 && sw == w) {
+        (*screen->GetImage)(src, src_sx, src_sy, sw, sh, ZPixmap, planeMask,
+                            pdstLine + (size_t) dy * dst_stride);
+        return;
+    }
+
+    tmp_stride = PixmapBytePad(sw, depth);
+    tmp = malloc((size_t) tmp_stride * sh);
+    if (!tmp)
+        return;
+
+    (*screen->GetImage)(src, src_sx, src_sy, sw, sh, ZPixmap, planeMask, tmp);
+    for (int r = 0; r < sh; r++)
+        memcpy(pdstLine + (size_t) (dy + r) * dst_stride + (size_t) dx * bpp8,
+               tmp + (size_t) r * tmp_stride, (size_t) sw * bpp8);
+    free(tmp);
+}
+
+/* The logical box (root coordinates) of a CRTC with a source and a
+ * scale-only transform, which is what can be stitched in. */
+static Bool
+xscale_stitch_box(RRCrtcPtr crtc, BoxPtr box)
+{
+    double sx, sy;
+    int width, height;
+
+    if (!crtc->xscale_source || !xscale_crtc_scale(crtc, &sx, &sy))
+        return FALSE;
+    RRCrtcGetScanoutSize(crtc, &width, &height);
+    box->x1 = crtc->x;
+    box->y1 = crtc->y;
+    box->x2 = crtc->x + width;
+    box->y2 = crtc->y + height;
+    return TRUE;
+}
+
+/* Renders the part `part` (root coordinates) of the CRTC's logical box
+ * `box` from its source, scaled down to logical size, into the result at
+ * the part's offset from (req_x0, req_y0). */
+static void
+xscale_stitch_source(ScreenPtr screen, RRCrtcPtr crtc, const BoxRec *box,
+                     const BoxRec *part, int req_x0, int req_y0, int w,
+                     int depth, int bpp8, int dst_stride,
+                     unsigned long planeMask, char *pdstLine)
+{
+    xscale_source_ptr src = crtc->xscale_source;
+    DrawablePtr source = src->drawable;
+    int pw = part->x2 - part->x1, ph = part->y2 - part->y1, error;
+    XID include_inferiors = IncludeInferiors;
+    PictFormatPtr src_format;
+    PictFilterPtr filter;
+    PicturePtr srcp, dstp;
+    PixmapPtr scratch;
+    PictTransform t;
+    double sx, sy;
+
+    if (!xscale_crtc_scale(crtc, &sx, &sy))
+        return;
+
+    if (source->type == DRAWABLE_WINDOW)
+        src_format = PictureWindowFormat((WindowPtr) source);
+    else if (source->depth == screen->rootDepth)
+        src_format = PictureWindowFormat(screen->root);
+    else
+        src_format = PictureMatchFormat(screen, source->depth, PICT_a8r8g8b8);
+    if (!src_format)
+        return;
+
+    scratch = (*screen->CreatePixmap)(screen, pw, ph, screen->rootDepth,
+                                      CREATE_PIXMAP_USAGE_SCRATCH);
+    if (!scratch)
+        return;
+
+    srcp = CreatePicture(None, source, src_format, CPSubwindowMode,
+                         &include_inferiors, serverClient, &error);
+    dstp = CreatePicture(None, &scratch->drawable,
+                         PictureWindowFormat(screen->root), 0L, NULL,
+                         serverClient, &error);
+    if (srcp && dstp) {
+        /* Destination (logical) pixels -> source (physical) pixels, the
+         * source starting (src_x, src_y) into its drawable. */
+        memset(&t, 0, sizeof(t));
+        t.matrix[0][0] = pixman_double_to_fixed(sx);
+        t.matrix[0][2] = pixman_int_to_fixed(src->src_x);
+        t.matrix[1][1] = pixman_double_to_fixed(sy);
+        t.matrix[1][2] = pixman_int_to_fixed(src->src_y);
+        t.matrix[2][2] = pixman_fixed_1;
+        SetPictureTransform(srcp, &t);
+
+        filter = PictureFindFilter(screen, (char *) FilterBilinear,
+                                   strlen(FilterBilinear));
+        if (filter)
+            SetPicturePictFilter(srcp, filter, NULL, 0);
+
+        CompositePicture(PictOpSrc, srcp, NULL, dstp,
+                         part->x1 - box->x1, part->y1 - box->y1, 0, 0, 0, 0,
+                         pw, ph);
+
+        xscale_read_into_result(screen, &scratch->drawable, 0, 0, pw, ph,
+                                part->x1 - req_x0, part->y1 - req_y0, w,
+                                depth, bpp8, dst_stride, planeMask, pdstLine);
+    }
+    if (srcp)
+        FreePicture(srcp, None);
+    if (dstp)
+        FreePicture(dstp, None);
+    dixDestroyPixmap(scratch, 0);
+}
+
+/* A root ZPixmap capture overlapping CRTCs with a source: reads everything
+ * else of the request through the screen's (unwrapped) GetImage, then the
+ * CRTCs' parts from their sources. FALSE - nothing done, the caller does a
+ * plain read - for any other read. */
+static Bool
+xscale_get_image_stitched(DrawablePtr pDrawable, int sx, int sy, int w, int h,
+                          unsigned int format, unsigned long planeMask,
+                          char *pdstLine)
+{
+    ScreenPtr screen = pDrawable->pScreen;
+    rrScrPrivPtr pScrPriv;
+    int depth, bpp8, dst_stride, nrects;
+    BoxRec req, box;
+    RegionRec remaining;
+    BoxPtr rects;
+    Bool any = FALSE;
+
+    if (xscale_source_count == 0 || format != ZPixmap ||
+        pDrawable->type != DRAWABLE_WINDOW ||
+        (WindowPtr) pDrawable != screen->root ||
+        pDrawable->bitsPerPixel % 8)
+        return FALSE;
+    pScrPriv = rrGetScrPriv(screen);
+    if (!pScrPriv)
+        return FALSE;
+
+    depth = pDrawable->depth;
+    bpp8 = pDrawable->bitsPerPixel / 8;
+    dst_stride = PixmapBytePad(w, depth);
+    req.x1 = pDrawable->x + sx;
+    req.y1 = pDrawable->y + sy;
+    req.x2 = req.x1 + w;
+    req.y2 = req.y1 + h;
+
+    /* What is left to read from the root once every stitchable CRTC box is
+     * taken out: the same predicate decides both, so every pixel taken out
+     * is filled in again below. */
+    RegionInit(&remaining, &req, 1);
+    for (int i = 0; i < pScrPriv->numCrtcs; i++) {
+        RegionRec r;
+
+        if (!xscale_stitch_box(pScrPriv->crtcs[i], &box))
+            continue;
+        RegionInit(&r, &box, 1);
+        if (RegionContainsRect(&remaining, &box) != rgnOUT) {
+            RegionSubtract(&remaining, &remaining, &r);
+            any = TRUE;
+        }
+        RegionUninit(&r);
+    }
+    if (!any) {
+        RegionUninit(&remaining);
+        return FALSE;
+    }
+
+    nrects = RegionNumRects(&remaining);
+    rects = RegionRects(&remaining);
+    for (int i = 0; i < nrects; i++) {
+        BoxPtr b = &rects[i];
+
+        xscale_read_into_result(screen, pDrawable,
+                                b->x1 - pDrawable->x, b->y1 - pDrawable->y,
+                                b->x2 - b->x1, b->y2 - b->y1,
+                                b->x1 - req.x1, b->y1 - req.y1, w,
+                                depth, bpp8, dst_stride, planeMask, pdstLine);
+    }
+    RegionUninit(&remaining);
+
+    for (int i = 0; i < pScrPriv->numCrtcs; i++) {
+        RRCrtcPtr crtc = pScrPriv->crtcs[i];
+        BoxRec part;
+
+        if (!xscale_stitch_box(crtc, &box))
+            continue;
+        part.x1 = max(box.x1, req.x1);
+        part.y1 = max(box.y1, req.y1);
+        part.x2 = min(box.x2, req.x2);
+        part.y2 = min(box.y2, req.y2);
+        if (part.x1 >= part.x2 || part.y1 >= part.y2)
+            continue;
+        xscale_stitch_source(screen, crtc, &box, &part, req.x1, req.y1, w,
+                             depth, bpp8, dst_stride, planeMask, pdstLine);
+    }
+    return TRUE;
+}
+
+/* ScreenRec.GetImage wrap; see the section comment above. */
+static void
+xscale_get_image(DrawablePtr pDrawable, int sx, int sy, int w, int h,
+                 unsigned int format, unsigned long planeMask, char *pdstLine)
+{
+    ScreenPtr screen = pDrawable->pScreen;
+    int n = screen->myNum;
+
+    screen->GetImage = xscale_orig_get_image[n];
+    if (!xscale_get_image_stitched(pDrawable, sx, sy, w, h, format, planeMask,
+                                   pdstLine))
+        (*screen->GetImage)(pDrawable, sx, sy, w, h, format, planeMask,
+                            pdstLine);
+    xscale_orig_get_image[n] = screen->GetImage;
+    screen->GetImage = xscale_get_image;
+}
+
+/* Screen close hook: takes the GetImage wrap off again, when it is still
+ * on top. */
+static void
+xscale_close_screen(CallbackListPtr *pcbl, ScreenPtr screen, void *unused)
+{
+    dixScreenUnhookClose(screen, xscale_close_screen);
+    if (screen->GetImage == xscale_get_image)
+        screen->GetImage = xscale_orig_get_image[screen->myNum];
+    xscale_orig_get_image[screen->myNum] = NULL;
+}
+
+/* ------------------------------------------------------------------ *
  *  Requests
  * ------------------------------------------------------------------ */
 
@@ -692,4 +962,15 @@ XScaleExtensionInit(void)
     xscale_event_base = ext->eventBase;
     EventSwapVector[xscale_event_base + XScaleScanoutNotify] =
         (EventSwapPtr) SXScaleScanoutNotifyEvent;
+
+    /* Root captures of CRTCs with a source (see "GetImage stitching"). */
+    for (int s = 0; s < screenInfo.numScreens; s++) {
+        ScreenPtr screen = screenInfo.screens[s];
+
+        if (!xscale_protocol_screen(screen))
+            continue;
+        xscale_orig_get_image[screen->myNum] = screen->GetImage;
+        screen->GetImage = xscale_get_image;
+        dixScreenHookClose(screen, xscale_close_screen);
+    }
 }
