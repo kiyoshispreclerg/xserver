@@ -38,8 +38,8 @@
 #include "dix/dix_priv.h"
 #include "os/fmt.h"
 #include "Xext/present/present_priv.h"
-#ifdef CONFIG_XSCALE
 #include <math.h>
+#ifdef CONFIG_XSCALE
 #include "include/xscale.h"
 #endif
 
@@ -2151,21 +2151,18 @@ drmmode_load_cursor_argb_check(xf86CrtcPtr crtc, CARD32 *image)
     int glyph_width = cursor->bits->width;
     int glyph_height = cursor->bits->height;
 
-#ifdef CONFIG_XSCALE
-    /* On a CRTC fed by an X-SCALE source, xf86_crtc_load_cursor_argb()
-     * (hw/xfree86/modes/xf86Cursors.c) already painted the glyph scaled up
-     * into the working buffer; the crop and the hardware cursor size below
-     * have to be chosen for that scaled size, or they clip it back down to
-     * the original one. */
+    /* On a scaled CRTC, xf86_crtc_load_cursor_argb() (hw/xfree86/modes/
+     * xf86Cursors.c) already painted the glyph scaled up into the working
+     * buffer; the crop and the hardware cursor size below have to be chosen
+     * for that scaled size, or they clip it back down to the original one. */
     {
         double sx, sy;
 
-        if (crtc->randr_crtc && XScaleGetCrtcScale(crtc->randr_crtc, &sx, &sy)) {
+        if (xf86CrtcCursorScale(crtc, &sx, &sy)) {
             glyph_width = (int) lround(glyph_width * sx);
             glyph_height = (int) lround(glyph_height * sy);
         }
     }
-#endif
 
     int crop_width = glyph_width;
     int crop_height = glyph_height;
