@@ -1084,6 +1084,19 @@ extern _X_EXPORT Bool
  xf86_cursors_init(ScreenPtr screen, int max_width, int max_height, int flags);
 
 /**
+ * Is the hardware cursor magnified on this CRTC, and by how much?
+ *
+ * TRUE when the CRTC's RandR transform is a plain scale (xrandr --scale,
+ * --scale-from), alone or with a rotation or reflection - for which the
+ * scale must be the same on both axes. sx, sy: the physical/logical ratio
+ * (> 1 when magnified), only written when returning TRUE. The cursor code
+ * then keeps the hardware cursor on such a CRTC, scaling its bitmap and
+ * position; a driver cropping that bitmap must size the crop by it too.
+ */
+extern _X_EXPORT Bool
+ xf86CrtcCursorScale(xf86CrtcPtr crtc, double *sx, double *sy);
+
+/**
  * Superseded by xf86CursorResetCursor, which is getting called
  * automatically when necessary.
  */
