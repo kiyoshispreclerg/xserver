@@ -34,6 +34,9 @@
 #include <math.h>
 
 #include "include/xf86DDC.h"
+#ifdef CONFIG_XSCALE
+#include "include/xscale.h"
+#endif
 
 #include "xf86.h"
 #include "xf86Crtc.h"
@@ -651,9 +654,21 @@ xf86_use_hw_cursor(ScreenPtr screen, CursorPtr cursor)
              * scaling in this file follow (xf86CrtcCursorScale()) */
             double sx, sy;
 
-            if (xf86CrtcCursorScale(crtc, &sx, &sy))
+            if (!xf86CrtcCursorScale(crtc, &sx, &sy))
+                return FALSE;
+#ifdef CONFIG_XSCALE
+            /* A CRTC fed by an X-SCALE source doesn't show the root, where
+             * the software cursor would be drawn: the hardware one it is,
+             * clipped if it has to be. */
+            if (crtc->randr_crtc && XScaleCrtcHasSource(crtc->randr_crtc))
                 continue;
-            return FALSE;
+#endif
+            /* Anywhere else, a cursor that doesn't fit the hardware buffer
+             * once magnified is drawn whole by the software cursor, as it
+             * was before scaled CRTCs kept the hardware one. */
+            if (cursor->bits->width * sx > cursor_info->MaxWidth ||
+                cursor->bits->height * sy > cursor_info->MaxHeight)
+                return FALSE;
         }
     }
 
