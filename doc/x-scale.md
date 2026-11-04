@@ -58,7 +58,7 @@ entirely.
 |--------|---------|--------|
 | 0 | `XScaleQueryVersion(major, minor)` | version negotiation; answers 1.0 |
 | 1 | `XScaleSelectInput(window, eventMask)` | (un)subscribe to `XScaleScanoutNotify`; `eventMask` 0 cancels |
-| 2 | `XScaleGetCrtcScanout(crtc)` → `(flags, scanoutWidth, scanoutHeight, x, y, width, height)` | the CRTC's physical size, its logical box in the root, and whether it can take a source |
+| 2 | `XScaleGetCrtcScanout(crtc)` → `(flags, scanoutWidth, scanoutHeight, x, y, width, height, rotation)` | the CRTC's physical size, its logical box in the root, whether it can take a source, and its RandR rotation |
 | 3 | `XScaleSetCrtcScanoutSource(crtc, drawable, srcX, srcY)` | feed the CRTC from `drawable`; `None` gives it back |
 | 4 | `XScaleCopyCrtcScanout(crtc, drawable, srcX, srcY, width, height, dstX, dstY)` | copy what the CRTC scans out, at the monitor's resolution, into `drawable`; for recorders (see "Recording at the monitor's resolution") |
 | 5 | `XScalePresentCrtcScanout(crtc, pixmap, serial, update)` | show a whole frame on the CRTC, flipped where the server can (see "Presenting frames") |
@@ -73,8 +73,16 @@ entirely.
 
 ### When a CRTC is capable
 
-A CRTC is capable when it has a scale-only transform (no rotation,
-reflection, shear or projection) *and* its DDX can take a source.
+A CRTC is capable when it has a scale-only transform (no shear or
+projection) *and* its DDX can take a source.
+
+A **rotated or reflected** CRTC is capable only with the same scale on
+both axes (the hardware cursor has to follow it). Its source is the
+picture as the CRTC scans it out: the logical picture scaled, then
+rotated and reflected the way RandR maps the CRTC to the root
+(`RRTransformCompute()`), `scanoutWidth` x `scanoutHeight`, the mode's
+size, with `rotation` saying how. Captures stitch any source back into
+the root through the CRTC's whole transform, so they come out upright.
 
 A DDX that can't never reports a capable CRTC. The compositor then renders
 that output at logical size and lets the server magnify it, which is
