@@ -1,4 +1,8 @@
-# XLibre Xserver
+# XiS: a XLibre Xserver fork
+
+This is a personal soft fork of XLibre named **XiS**, adding a small set of features on top of upstream while staying fully compatible with XLibre/X11.
+
+## XLibre Xserver
 
 [![GetMerged Scorecard](https://getmerged.abhishekco.de/api/badge/X11Libre/xserver)](https://getmerged.abhishekco.de/X11Libre/xserver)
 
@@ -24,18 +28,18 @@ The XLibre Xserver is the community-managed display server for the [X Window Sys
 To learn more about the features and mission of XLibre, please [visit our homepage](https://xlibre.net).
 
 
-## This Fork: XiS
+## XiS Features
 
-This is a soft fork of XLibre named **XiS**, adding a small set of features on top of upstream. It stays fully compatible with XLibre/X11 — nothing here changes the protocol or default behavior unless explicitly configured.
-
-* **[Xnotify](doc/Xnotify.md)** for static or dynamic permission rules.
+* **[Xnotify](doc/Xnotify.md)** for static or dynamic resource access notifications and rules.
 * **`DisablePrimarySelection`** `ServerFlags` option to turn off the X11 PRIMARY selection.
 * **`KickHotkeysOnRelease`** and **`ToggleModifiersOnPress`** XKB input options, fixing some old small annoyances.
 * Legacy **DGA** protocol brought back, with its raw framebuffer and input access guarded by **[Xnotify](doc/Xnotify.md)**.
-* **[Per-CRTC presentation](doc/present-per-crtc-flip.md)** in the Present extension: a compositor can page-flip a single output instead of the whole screen, so per-output and multi-monitor compositors avoid full-screen copies.
-* **modesetting** DDX updated as the first driver to support per-CRTC page flips.
-* **`AutoDPI`** `ServerFlags` option to calculate automatically each output's DPI from EDID size and mode.
+* **[Per-CRTC presentation](doc/present-per-crtc-flip.md)** in the updated Present extension.
+* **modesetting** DDX updated as the first driver to support per-CRTC page flips, allowing independent per-monitor refresh rates.
+* **`AutoDPI`** `ServerFlags` option to automatically calculate each output's DPI from EDID size and mode.
 * Modesetting DDX's **`TearFree`** and **`PerCRTCFlip`** as runtime togglable RandR properties.
+* **[X-SCALE](doc/x-scale.md)** extension for sharp per-output scaling: outputs are scaled with ordinary RandR transforms and a compositor hands each scaled CRTC its physical-resolution picture.
+* Hotkeys and screen locking keep working even while menus are open.
 
 And more. See the commit history for details on every change.
 
