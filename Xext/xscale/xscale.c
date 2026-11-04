@@ -1625,6 +1625,7 @@ ProcXScaleGetCrtcScanout(ClientPtr client)
         reply.y = crtc->y;
         reply.width = lw;
         reply.height = lh;
+        reply.rotation = crtc->rotation;
     }
 
     X_REPLY_FIELD_CARD16(scanoutWidth);
@@ -1633,6 +1634,7 @@ ProcXScaleGetCrtcScanout(ClientPtr client)
     X_REPLY_FIELD_CARD16(y);
     X_REPLY_FIELD_CARD16(width);
     X_REPLY_FIELD_CARD16(height);
+    X_REPLY_FIELD_CARD16(rotation);
     return X_SEND_REPLY_SIMPLE(client, reply);
 }
 

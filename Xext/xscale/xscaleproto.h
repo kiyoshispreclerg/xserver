@@ -217,9 +217,17 @@ typedef struct {
  * resolution for an untransformed or plainly scaled CRTC, the size a
  * source has to cover and XScaleCopyCrtcScanout copies; for a rotated,
  * reflected or otherwise transformed CRTC, the size of the root area it
- * covers. x/y/width/height: the logical box the CRTC shows, in root
+ * covers - unless the CRTC is capable, when it is always the size a source
+ * has to be. x/y/width/height: the logical box the CRTC shows, in root
  * coordinates (its transformed footprint). Both are filled whenever the
- * CRTC has a mode, capable or not; all zero for a disabled CRTC. */
+ * CRTC has a mode, capable or not; all zero for a disabled CRTC.
+ *
+ * rotation: the CRTC's RandR rotation and reflection (RR_Rotate_*,
+ * RR_Reflect_*). A rotated or reflected CRTC's source, when it can take
+ * one, is the picture as the CRTC scans it out: the logical picture
+ * scaled and then rotated and reflected the way RandR maps the CRTC to
+ * the root (RRTransformCompute()), of scanoutWidth x scanoutHeight, the
+ * mode's size. */
 typedef struct {
     BYTE    type;               /* X_Reply */
     CARD8   flags;              /* XScaleScanout* */
@@ -231,7 +239,8 @@ typedef struct {
     INT16   y;
     CARD16  width;
     CARD16  height;
-    CARD32  pad1;
+    CARD16  rotation;           /* RR_Rotate_* | RR_Reflect_* */
+    CARD16  pad1;
     CARD32  pad2;
     CARD32  pad3;
 } xXScaleGetCrtcScanoutReply;
