@@ -31,9 +31,10 @@
 #include <X11/extensions/render.h>
 #include <X11/extensions/dpmsconst.h>
 
+#include <math.h>
+
 #include "include/xf86DDC.h"
 #ifdef CONFIG_XSCALE
-#include <math.h>
 #include "include/xscale.h"
 #endif
 
@@ -45,6 +46,54 @@
 #include "picturestr.h"
 #include "cursorstr.h"
 #include "inputstr.h"
+
+/*
+ * The hardware cursor on a scaled CRTC (xf86CrtcCursorScale()).
+ *
+ * A CRTC with a RandR transform shows the root magnified, and a software
+ * cursor drawn into the root would be magnified with it, but the software
+ * cursor is one for the whole screen: one such CRTC used to force it
+ * everywhere. That costs a redraw of the root under the pointer on every
+ * move, blocks every page flip (Present's checks refuse with a visible
+ * software sprite), and on a CRTC fed by an X-SCALE scanout source, which
+ * doesn't show the root, leaves no cursor at all - for instance on a
+ * scaled output next to one that is scaled and rotated, which can't take
+ * a source.
+ *
+ * So for a transform that is a plain scale, with or without a rotation or
+ * reflection, the hardware cursor stays on: its bitmap is magnified by
+ * the scale (nearest neighbour, then rotated as for any rotated CRTC), and
+ * its position is the CRTC-local offset scaled by the same factor before
+ * the rotation is applied. Any other transform keeps the software cursor.
+ */
+Bool
+xf86CrtcCursorScale(xf86CrtcPtr crtc, double *sx, double *sy)
+{
+    const struct pixman_f_transform *t = &crtc->transform.f_transform;
+    double x, y;
+
+    if (!crtc->transformPresent)
+        return FALSE;
+
+    /* f_transform maps CRTC (physical) pixels to the framebuffer (logical) */
+    if (fabs(t->m[0][1]) > 1e-6 || fabs(t->m[1][0]) > 1e-6 ||
+        fabs(t->m[0][2]) > 1e-6 || fabs(t->m[1][2]) > 1e-6 ||
+        fabs(t->m[2][0]) > 1e-6 || fabs(t->m[2][1]) > 1e-6 ||
+        fabs(t->m[2][2] - 1.0) > 1e-6 ||
+        t->m[0][0] <= 0.0 || t->m[1][1] <= 0.0)
+        return FALSE;
+
+    x = 1.0 / t->m[0][0];
+    y = 1.0 / t->m[1][1];
+
+    /* Rotated, the two axes trade places: only a uniform scale survives */
+    if ((crtc->rotation & 0xf) != RR_Rotate_0 && fabs(x - y) > 0.02 * x)
+        return FALSE;
+
+    *sx = x;
+    *sy = y;
+    return TRUE;
+}
 
 /*
  * Returns the rotation being performed by the server.  If the driver indicates
