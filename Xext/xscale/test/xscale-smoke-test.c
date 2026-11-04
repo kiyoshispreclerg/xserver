@@ -20,6 +20,7 @@
  *      it answer BadAccess, which is reported as a skip.
  *   7. PresentCrtcScanout is refused with BadMatch on that CRTC, and
  *      with BadPixmap for a pixmap that doesn't exist.
+ *   8. GetCrtcScanout reports the CRTC's RandR rotation.
  *
  * The capable side - a sharp source actually shown on a transformed CRTC,
  * the hardware cursor taking over - needs an xf86 DDX on real hardware with
@@ -220,6 +221,10 @@ main(void)
         CHECK(u[0] == cw && u[1] == ch, "scanout size is the mode size");
         CHECK(s[2] == cx && s[3] == cy && u[4] == cw && u[5] == ch,
               "logical box is the CRTC's box without a transform");
+        /* [20..21] = rotation */
+        CHECK(ci && u[6] == ci->rotation,
+              "rotation is the CRTC's RandR rotation (0x%x, want 0x%x)",
+              u[6], ci ? ci->rotation : 0);
         free(gr);
     }
 
