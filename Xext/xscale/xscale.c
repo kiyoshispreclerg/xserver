@@ -966,15 +966,14 @@ xscale_read_into_result(ScreenPtr screen, DrawablePtr src,
     free(tmp);
 }
 
-/* The logical box (root coordinates) of a CRTC with a source and a
- * scale-only transform, which is what can be stitched in. */
+/* The logical box (root coordinates) of a CRTC with a source, which is
+ * what can be stitched in. */
 static Bool
 xscale_stitch_box(RRCrtcPtr crtc, BoxPtr box)
 {
-    double sx, sy;
     int width, height;
 
-    if (!crtc->xscale_source || !xscale_crtc_scale(crtc, &sx, &sy))
+    if (!crtc->xscale_source || !crtc->mode)
         return FALSE;
     RRCrtcGetScanoutSize(crtc, &width, &height);
     box->x1 = crtc->x;
@@ -985,9 +984,11 @@ xscale_stitch_box(RRCrtcPtr crtc, BoxPtr box)
 }
 
 /* Renders the part `part` (root coordinates) of the CRTC's logical box
- * `box` from its source, scaled down to logical size (bilinear), into
- * `dst` at (dst_x, dst_y). The one place a source is turned back into what
- * the root would hold, for both GetImage and CopyArea. */
+ * `box` from its source, back through the CRTC's transform - scaled down
+ * to logical size (bilinear), and turned upright when the CRTC is rotated
+ * or reflected - into `dst` at (dst_x, dst_y). The one place a source is
+ * turned back into what the root would hold, for both GetImage and
+ * CopyArea. */
 static Bool
 xscale_render_source(RRCrtcPtr crtc, const BoxRec *box, const BoxRec *part,
                      DrawablePtr dst, int dst_x, int dst_y)
@@ -1000,12 +1001,9 @@ xscale_render_source(RRCrtcPtr crtc, const BoxRec *box, const BoxRec *part,
     PictFilterPtr filter;
     PicturePtr srcp, dstp;
     PictTransform t;
-    double sx, sy;
+    struct pixman_f_transform ft, step;
     int error;
     Bool done = FALSE;
-
-    if (!xscale_crtc_scale(crtc, &sx, &sy))
-        return FALSE;
 
     src_format = xscale_drawable_format(screen, source);
     dst_format = xscale_drawable_format(screen, dst);
@@ -1016,14 +1014,16 @@ xscale_render_source(RRCrtcPtr crtc, const BoxRec *box, const BoxRec *part,
                          &include_inferiors, serverClient, &error);
     dstp = CreatePicture(None, dst, dst_format, 0L, NULL, serverClient, &error);
     if (srcp && dstp) {
-        /* Destination (logical) pixels -> source (physical) pixels, the
-         * source starting (src_x, src_y) into its drawable. */
-        memset(&t, 0, sizeof(t));
-        t.matrix[0][0] = pixman_double_to_fixed(sx);
-        t.matrix[0][2] = pixman_int_to_fixed(src->src_x);
-        t.matrix[1][1] = pixman_double_to_fixed(sy);
-        t.matrix[1][2] = pixman_int_to_fixed(src->src_y);
-        t.matrix[2][2] = pixman_fixed_1;
+        /* Destination pixels, counted from the box's corner, -> root
+         * pixels -> scanout pixels (the CRTC's whole transform backwards:
+         * position, scale, reflection, rotation) -> the source, starting
+         * (src_x, src_y) into its drawable. */
+        pixman_f_transform_init_translate(&ft, box->x1, box->y1);
+        pixman_f_transform_multiply(&ft, &crtc->f_inverse, &ft);
+        pixman_f_transform_init_translate(&step, src->src_x, src->src_y);
+        pixman_f_transform_multiply(&ft, &step, &ft);
+        if (!pixman_transform_from_pixman_f_transform(&t, &ft))
+            goto out;
         SetPictureTransform(srcp, &t);
 
         filter = PictureFindFilter(screen, (char *) FilterBilinear,
@@ -1037,6 +1037,7 @@ xscale_render_source(RRCrtcPtr crtc, const BoxRec *box, const BoxRec *part,
                          part->x2 - part->x1, part->y2 - part->y1);
         done = TRUE;
     }
+ out:
     if (srcp)
         FreePicture(srcp, None);
     if (dstp)
