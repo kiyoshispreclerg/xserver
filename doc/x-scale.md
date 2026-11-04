@@ -252,30 +252,38 @@ keeps Present's `XiSRootCopy` promise true with X-SCALE.
 ## Hardware cursor
 
 The software cursor is drawn into the root, which a CRTC with a source no
-longer shows, so the hardware cursor has to take over there:
+longer shows, so the hardware cursor has to take over there. It does on
+every scaled CRTC, source or not:
 
 - `xf86_use_hw_cursor()` (`hw/xfree86/modes/xf86Cursors.c`) normally
-  refuses any transformed CRTC. It now allows one with a source.
+  refuses any transformed CRTC. It allows one whose transform is a plain
+  scale, alone or with a rotation or reflection (then the same on both
+  axes): `xf86CrtcCursorScale()`.
 - `source_changed` calls `xf86CursorResetCursor()`, so that choice is made
   again the moment a source is set or dropped.
 
-On such a CRTC, `XScaleGetCrtcScale()` gives the physical/logical ratio,
+On such a CRTC, `xf86CrtcCursorScale()` gives the physical/logical ratio,
 and the cursor code uses it for:
 
 - **position** — `xf86_crtc_set_cursor_position()` scales the CRTC's own
   local offset (not the shared desktop position), so the cursor is placed
-  right even while straddling an unscaled neighbour;
+  right even while straddling an unscaled neighbour; on a rotated CRTC the
+  offset and the hotspot are scaled before the rotation is applied;
 - **bitmap** — `xf86_crtc_load_cursor_argb()` upsamples the glyph (nearest
   neighbour) into the hardware buffer, and the modesetting DDX's
   `drmmode_load_cursor_argb_check()` sizes its crop from the scaled glyph,
   so the cursor keeps its logical size.
 
+Keeping the hardware cursor on scaled CRTCs without a source matters too:
+a single software cursor anywhere blocks every page flip on the screen.
+
 Two limits:
 
 - a glyph that no longer fits the hardware buffer once scaled is clipped;
 - if the hardware cursor can't be used at all (another CRTC with a
-  non-scale transform forces the software cursor for the whole screen),
-  the cursor is not visible on a CRTC with a source.
+  transform that isn't a scale, or a scale that differs between the axes
+  of a rotated CRTC, forces the software cursor for the whole screen), the
+  cursor is not visible on a CRTC with a source.
 
 ## Cost
 

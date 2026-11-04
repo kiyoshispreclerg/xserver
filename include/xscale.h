@@ -210,9 +210,10 @@ extern _X_EXPORT void XScaleScanoutCopied(RRCrtcPtr crtc, uint64_t token,
  *
  * TRUE iff the CRTC has a source and a scale-only transform. On such a
  * CRTC the hardware cursor is what shows the pointer - the software
- * cursor is drawn into the root, which the CRTC no longer shows - so the
- * cursor code allows it there and scales its position and bitmap by this
- * (hw/xfree86/modes/xf86Cursors.c, and the modesetting DDX's crop).
+ * cursor is drawn into the root, which the CRTC no longer shows. The xf86
+ * cursor code keeps the hardware cursor on every scaled CRTC, source or
+ * not, and scales it by xf86CrtcCursorScale(), which agrees with this
+ * wherever both answer.
  */
 extern _X_EXPORT Bool XScaleGetCrtcScale(RRCrtcPtr crtc, double *sx, double *sy);
 
