@@ -205,19 +205,48 @@ xscale_scanout_size(RRCrtcPtr crtc, int *width, int *height)
         RRCrtcGetScanoutSize(crtc, width, height);
 }
 
-/* Can the CRTC take a source now, and of what size? */
+/* Is the CRTC's transform one a source can stand in for: a plain scale
+ * (none at all included), with or without a rotation or reflection - in
+ * which case the scale is the same on both axes, as the hardware cursor
+ * that has to show the pointer there needs it (xf86CrtcCursorScale()). */
+static Bool
+xscale_crtc_scanout_geometry(RRCrtcPtr crtc)
+{
+    const struct pixman_f_transform *t =
+        &crtc->client_current_transform.f_transform;
+    double sx, sy;
+
+    if (!crtc->mode)
+        return FALSE;
+    if (crtc->rotation == RR_Rotate_0)
+        return xscale_crtc_scale(crtc, &sx, &sy);
+
+    /* Rotated: the client part of the transform, which RandR applies
+     * after the rotation (RRTransformCompute()), must be a plain scale. */
+    if (fabs(t->m[0][1]) > 1e-6 || fabs(t->m[1][0]) > 1e-6 ||
+        fabs(t->m[0][2]) > 1e-6 || fabs(t->m[1][2]) > 1e-6 ||
+        fabs(t->m[2][0]) > 1e-6 || fabs(t->m[2][1]) > 1e-6 ||
+        fabs(t->m[2][2] - 1.0) > 1e-6 ||
+        t->m[0][0] <= 0.0 || t->m[1][1] <= 0.0)
+        return FALSE;
+    sx = 1.0 / t->m[0][0];
+    sy = 1.0 / t->m[1][1];
+    return fabs(sx - sy) <= 0.02 * sx;
+}
+
+/* Can the CRTC take a source now, and of what size? A rotated or
+ * reflected one takes a source drawn in its scanout orientation. */
 static Bool
 xscale_crtc_capable(RRCrtcPtr crtc, int *width, int *height)
 {
     const XScaleScanoutFuncs *funcs;
-    double sx, sy;
 
     if (noXScaleExtension || !crtc->mode)
         return FALSE;
     funcs = xscale_funcs(crtc->pScreen);
     if (!funcs || !funcs->capable)
         return FALSE;
-    if (!xscale_crtc_scale(crtc, &sx, &sy))
+    if (!xscale_crtc_scanout_geometry(crtc))
         return FALSE;
     return funcs->capable(crtc, width, height);
 }
