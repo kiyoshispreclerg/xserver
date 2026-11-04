@@ -42,8 +42,9 @@ drmmode_xscale_capable(RRCrtcPtr randr_crtc, int *width, int *height)
     if (crtc && drmmode_crtc_renders_transform(crtc)) {
         drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
 
-        if (crtc->rotation != RR_Rotate_0 ||
-            (!drmmode_crtc->tearfree.buf[0].px && !drmmode_crtc->tearfree.parked))
+        /* Rotated too: the TearFree buffers hold the picture as the CRTC
+         * scans it out, which is how a rotated CRTC's source is drawn */
+        if (!drmmode_crtc->tearfree.buf[0].px && !drmmode_crtc->tearfree.parked)
             return FALSE;
         *width = crtc->mode.HDisplay;
         *height = crtc->mode.VDisplay;
