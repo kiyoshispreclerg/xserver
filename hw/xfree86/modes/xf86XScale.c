@@ -182,7 +182,10 @@ xf86CrtcCopyScanoutSource(xf86CrtcPtr crtc, PixmapPtr dst_pixmap,
  *
  * Only a transform this layer handles itself, through a shadow of its own:
  * a DDX doing the transform on its own scanout buffers (amdgpu with
- * TearFree, for one) has nothing this could fill.
+ * TearFree, for one) has nothing this could fill. Rotated or not: the
+ * shadow holds the picture as the CRTC scans it out, which is how a
+ * source for a rotated CRTC is drawn, so it is copied 1:1
+ * either way.
  */
 static Bool
 xf86ScanoutCapable(RRCrtcPtr randr_crtc, int *width, int *height)
@@ -190,7 +193,6 @@ xf86ScanoutCapable(RRCrtcPtr randr_crtc, int *width, int *height)
     xf86CrtcPtr crtc = randr_crtc->devPrivate;
 
     if (!crtc || !crtc->enabled || !crtc->transform_in_use ||
-        crtc->rotation != RR_Rotate_0 ||
         (crtc->driverIsPerformingTransform & XF86DriverTransformOutput) ||
         (!crtc->rotatedData && !crtc->rotatedPixmap))
         return FALSE;
