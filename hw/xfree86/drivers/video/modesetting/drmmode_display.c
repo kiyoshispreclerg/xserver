@@ -3637,6 +3637,21 @@ drmmode_crtc_per_crtc_flip_wanted(xf86CrtcPtr crtc)
                                       drmmode_crtc->drmmode->per_crtc_flip);
 }
 
+/* May an X-SCALE presented pixmap be page-flipped onto 'crtc'
+ * (drmmode_xscale.c)? The output's "PerCRTCFlip" property still decides
+ * when it says on or off, but "auto" means yes whatever Option
+ * "PerCRTCFlip" says: that default is held back for Present's flips of
+ * whatever buffer an application hands over, whereas here the compositor
+ * asked for the CRTC's scanout and sends buffers of its exact size. */
+Bool
+drmmode_crtc_xscale_flip_wanted(xf86CrtcPtr crtc)
+{
+    return drmmode_crtc_toggle_wanted(crtc,
+                                      offsetof(drmmode_output_private_rec,
+                                               per_crtc_flip),
+                                      TRUE);
+}
+
 /* Should 'crtc' scan out through TearFree shadow buffers? Decides whether
  * drmmode_create_tearfree_shadow() builds them; whether TearFree is *active*
  * on a CRTC is then simply whether those buffers exist. */

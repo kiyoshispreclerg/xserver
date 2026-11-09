@@ -413,6 +413,7 @@ int drmmode_crtc_flip(xf86CrtcPtr crtc, uint32_t fb_id, int x, int y,
 
 Bool drmmode_crtc_get_fb_id(xf86CrtcPtr crtc, uint32_t *fb_id, int *x, int *y);
 Bool drmmode_crtc_per_crtc_flip_wanted(xf86CrtcPtr crtc);
+Bool drmmode_crtc_xscale_flip_wanted(xf86CrtcPtr crtc);
 Bool drmmode_crtc_tearfree_wanted(xf86CrtcPtr crtc);
 void drmmode_tearfree_park(xf86CrtcPtr crtc);
 Bool drmmode_tearfree_unpark(xf86CrtcPtr crtc);
