@@ -62,7 +62,8 @@ drmmode_xscale_capable(RRCrtcPtr randr_crtc, int *width, int *height)
  * CRTC whose scanout a per-CRTC flip owns). Going back is a TearFree flip
  * of a back buffer refilled in full (drmmode_xscale_unflip()), so the
  * CRTC never shows a stale TearFree buffer. The same conditions as for
- * Present's per-CRTC flips apply.
+ * Present's per-CRTC flips apply, except that they are on by default
+ * (drmmode_crtc_xscale_flip_wanted()).
  */
 
 typedef struct {
@@ -80,7 +81,7 @@ drmmode_xscale_can_flip_crtc(xf86CrtcPtr crtc)
            ms->drmmode.pageflip && ms->drmmode.glamor &&
            ms->atomic_modeset_capable &&
            !ms->drmmode.per_crtc_flip_failed &&
-           drmmode_crtc_per_crtc_flip_wanted(crtc) &&
+           drmmode_crtc_xscale_flip_wanted(crtc) &&
            !ms->drmmode.pending_modeset &&
            !ms->drmmode.dri2_flipping && !ms->drmmode.present_flipping &&
            !drmmode_crtc->xscale_flip_pending &&
