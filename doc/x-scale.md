@@ -317,10 +317,12 @@ its `update` region.
   `--transform`, with or without X-SCALE.
 - Presented frames are flipped onto the CRTC by modesetting when
   TearFree renders that CRTC (the TearFree buffers then sit idle), when
-  per-CRTC flips are allowed on its output (`PerCRTCFlip`, atomic KMS),
-  and when the buffer's format and modifier can be scanned out. Leaving a
-  flipped frame is a TearFree flip of a back buffer refilled in full, so
-  no stale picture is shown. Without TearFree, or on any other DDX,
+  the kernel driver is atomic-capable, when the output's `PerCRTCFlip`
+  property isn't `off` (its `auto` allows these flips even with
+  `Option "PerCRTCFlip"` left off, which only holds back Present's flips
+  of application buffers), and when the buffer's format and modifier can
+  be scanned out. Leaving a flipped frame is a TearFree flip of a back
+  buffer refilled in full, so no stale picture is shown. Without TearFree, or on any other DDX,
   presented frames are copied.
 
 ### Recording at the monitor's resolution
