@@ -204,6 +204,12 @@ typedef struct {
      * shows them. See ms_tearfree_do_flips(). */
     Bool parked;
     CARD32 owned_since;
+    /* What the buffers were last made with, kept while parked: the
+     * stride, format and modifier a legacy page flip onto the CRTC can
+     * keep it at (drmmode_xscale.c). */
+    uint32_t stride;
+    uint32_t format;
+    uint64_t modifier;
 } drmmode_tearfree_rec, *drmmode_tearfree_ptr;
 
 typedef struct {
@@ -414,6 +420,18 @@ int drmmode_crtc_flip(xf86CrtcPtr crtc, uint32_t fb_id, int x, int y,
 Bool drmmode_crtc_get_fb_id(xf86CrtcPtr crtc, uint32_t *fb_id, int *x, int *y);
 Bool drmmode_crtc_per_crtc_flip_wanted(xf86CrtcPtr crtc);
 Bool drmmode_crtc_xscale_flip_wanted(xf86CrtcPtr crtc);
+
+/* A bo's modifier, DRM_FORMAT_MOD_INVALID where gbm can't tell (< 17.1) */
+static inline uint64_t
+drmmode_bo_modifier(struct gbm_bo *bo)
+{
+#ifdef GBM_BO_WITH_MODIFIERS
+    return gbm_bo_get_modifier(bo);
+#else
+    return DRM_FORMAT_MOD_INVALID;
+#endif
+}
+
 Bool drmmode_crtc_tearfree_wanted(xf86CrtcPtr crtc);
 void drmmode_tearfree_park(xf86CrtcPtr crtc);
 Bool drmmode_tearfree_unpark(xf86CrtcPtr crtc);
