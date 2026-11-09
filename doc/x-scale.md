@@ -317,7 +317,9 @@ its `update` region.
   `--transform`, with or without X-SCALE.
 - Presented frames are flipped onto the CRTC by modesetting when
   TearFree renders that CRTC (the TearFree buffers then sit idle), when
-  the kernel driver is atomic-capable, when the output's `PerCRTCFlip`
+  the kernel driver is atomic-capable or the buffer has the stride,
+  format and modifier of the TearFree buffers (a legacy page flip isn't
+  trusted with anything else), when the output's `PerCRTCFlip`
   property isn't `off` (its `auto` allows these flips even with
   `Option "PerCRTCFlip"` left off, which only holds back Present's flips
   of application buffers), and when the buffer's format and modifier can
