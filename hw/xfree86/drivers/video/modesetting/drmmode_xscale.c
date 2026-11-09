@@ -63,7 +63,9 @@ drmmode_xscale_capable(RRCrtcPtr randr_crtc, int *width, int *height)
  * of a back buffer refilled in full (drmmode_xscale_unflip()), so the
  * CRTC never shows a stale TearFree buffer. The same conditions as for
  * Present's per-CRTC flips apply, except that they are on by default
- * (drmmode_crtc_xscale_flip_wanted()).
+ * (drmmode_crtc_xscale_flip_wanted()) and that a driver without atomic
+ * modesetting takes them too, for buffers it can flip to safely
+ * (drmmode_xscale_flip_shape_ok()).
  */
 
 typedef struct {
@@ -79,13 +81,39 @@ drmmode_xscale_can_flip_crtc(xf86CrtcPtr crtc)
     return drmmode_crtc_renders_transform(crtc) &&
            ms_tearfree_is_active_on_crtc(crtc) &&
            ms->drmmode.pageflip && ms->drmmode.glamor &&
-           ms->atomic_modeset_capable &&
            !ms->drmmode.per_crtc_flip_failed &&
            drmmode_crtc_xscale_flip_wanted(crtc) &&
            !ms->drmmode.pending_modeset &&
            !ms->drmmode.dri2_flipping && !ms->drmmode.present_flipping &&
            !drmmode_crtc->xscale_flip_pending &&
            !drmmode_crtc->tearfree.flip_seq;
+}
+
+/*
+ * Can the kernel be handed a flip to `bo` on `crtc`? On a driver with
+ * atomic modesetting, whatever the buffer: the atomic path takes any
+ * stride, format and modifier the CRTC can scan out, and a legacy flip
+ * there that can't fails with EINVAL, which ms_do_pageflip_crtc() turns
+ * into copies from then on. Without it, legacy page flips aren't trusted
+ * to change the stride, format or tiling the CRTC scans out (no error,
+ * just a wrong picture on some drivers; Present's whole-screen flips check
+ * the stride for the same reason), so only a buffer shaped exactly like
+ * the TearFree ones the CRTC flips between anyway. A compositor's
+ * swapchain is uniform, so a CRTC showing one of its frames is still at
+ * that shape.
+ */
+static Bool
+drmmode_xscale_flip_shape_ok(xf86CrtcPtr crtc, struct gbm_bo *bo)
+{
+    modesettingPtr ms = modesettingPTR(crtc->scrn);
+    drmmode_crtc_private_ptr drmmode_crtc = crtc->driver_private;
+    drmmode_tearfree_ptr trf = &drmmode_crtc->tearfree;
+
+    if (ms->atomic_modeset_capable)
+        return TRUE;
+    return gbm_bo_get_stride(bo) == trf->stride &&
+           gbm_bo_get_format(bo) == trf->format &&
+           drmmode_bo_modifier(bo) == trf->modifier;
 }
 
 /* Back from a flipped presented pixmap to the TearFree buffers, refilled
@@ -182,7 +210,11 @@ drmmode_xscale_flip(RRCrtcPtr randr_crtc, PixmapPtr pixmap)
     if (!bo)
         return FALSE;
     format = gbm_bo_get_format(bo);
-    modifier = gbm_bo_get_modifier(bo);
+    modifier = drmmode_bo_modifier(bo);
+    if (!drmmode_xscale_flip_shape_ok(crtc, bo)) {
+        gbm_bo_destroy(bo);
+        return FALSE;
+    }
     gbm_bo_destroy(bo);
     if (!drmmode_is_format_supported(crtc->scrn, format, modifier, FALSE))
         return FALSE;

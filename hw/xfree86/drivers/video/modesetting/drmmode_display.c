@@ -1671,6 +1671,9 @@ drmmode_tearfree_alloc(xf86CrtcPtr crtc)
         }
         RegionInit(&trf->buf[i].dmg, &crtc->bounds, 0);
     }
+    trf->stride = gbm_bo_get_stride(trf->buf[0].bo);
+    trf->format = gbm_bo_get_format(trf->buf[0].bo);
+    trf->modifier = drmmode_bo_modifier(trf->buf[0].bo);
 
     /* Initialize the front buffer with the current scanout */
     drmmode_copy_damage(crtc, trf->buf[trf->back_idx ^ 1].px,
