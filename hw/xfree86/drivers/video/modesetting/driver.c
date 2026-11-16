@@ -1623,10 +1623,11 @@ PreInit(ScrnInfoPtr pScrn, int flags)
     ret = drmSetClientCap(ms->fd, DRM_CLIENT_CAP_ATOMIC, 0);
     ms->atomic_modeset_capable = (ret == 0);
 
-    if (xf86ReturnOptValBool(ms->drmmode.Options, OPTION_ATOMIC, FALSE)) {
+    if (xf86ReturnOptValBool(ms->drmmode.Options, OPTION_ATOMIC, TRUE)) {
         ret = drmSetClientCap(ms->fd, DRM_CLIENT_CAP_ATOMIC, 2);
         ms->atomic_modeset = (ret == 0);
-        if (!ms->atomic_modeset)
+        if (!ms->atomic_modeset &&
+            xf86IsOptionSet(ms->drmmode.Options, OPTION_ATOMIC))
             xf86DrvMsg(pScrn->scrnIndex, X_WARNING, "Atomic modesetting not supported\n");
     } else {
         ms->atomic_modeset = FALSE;

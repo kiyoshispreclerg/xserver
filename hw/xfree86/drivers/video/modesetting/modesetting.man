@@ -148,7 +148,7 @@ The default is
 .TP
 .BI "Option \*qAtomic\*q \*q" boolean \*q
 Enable atomic modesetting when supported.  The default is
-.B off.
+.B on.
 .TP
 .SH "SEE ALSO"
 .BR @xservername@ (@appmansuffix@),
