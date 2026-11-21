@@ -191,6 +191,31 @@ ms_present_flush(WindowPtr window)
 }
 
 #ifdef GLAMOR_HAS_GBM
+/*
+ * Flush rendering for an explicitly synchronized copy. Returns a sync_file
+ * fd that signals when it completes, or -1 once it has completed.
+ */
+static int
+ms_present_flush_fenced(WindowPtr window)
+{
+    ScreenPtr screen = window->drawable.pScreen;
+    ScrnInfoPtr scrn = xf86ScreenToScrn(screen);
+    modesettingPtr ms = modesettingPTR(scrn);
+    int fd = -1;
+
+    if (!ms->drmmode.glamor)
+        return -1;
+
+    if (ms->glamor.egl_flush_fence_fd)
+        fd = ms->glamor.egl_flush_fence_fd(screen);
+    if (fd < 0)
+        glamor_finish(screen);
+
+    return fd;
+}
+#endif
+
+#ifdef GLAMOR_HAS_GBM
 
 /**
  * Callback for the DRM event queue when a flip has completed on all pipes
@@ -655,5 +680,36 @@ ms_present_screen_init(ScreenPtr screen)
         ms_present_screen_info.get_crtc = NULL;
     }
 
-    return present_screen_init(screen, &ms_present_screen_info);
+    /* Present keeps this pointer, so each screen needs its own copy. */
+    ms->present_info = ms_present_screen_info;
+
+#if defined(GLAMOR_HAS_GBM) && defined(DRI3)
+    {
+        const char *reason = NULL;
+
+        if (!ms->drmmode.glamor)
+            reason = "no glamor";
+        else if (!ms->glamor.egl_flush_fence_fd || !ms->glamor.egl_syncobj_supported)
+            reason = "glamor too old";
+        else if (!ms->glamor.egl_syncobj_supported(screen))
+            reason = "no DRI3 sync objects";
+
+        if (reason) {
+            xf86DrvMsg(scrn->scrnIndex, X_INFO,
+                       "Present explicit sync: disabled (%s)\n", reason);
+        } else {
+            ms->present_info.capabilities |= PresentCapabilitySyncobj;
+            xf86DrvMsg(scrn->scrnIndex, X_INFO, "Present explicit sync: enabled\n");
+        }
+    }
+#endif
+
+    if (!present_screen_init(screen, &ms->present_info))
+        return FALSE;
+
+#ifdef GLAMOR_HAS_GBM
+    present_screen_set_flush_fenced(screen, ms_present_flush_fenced);
+#endif
+
+    return TRUE;
 }

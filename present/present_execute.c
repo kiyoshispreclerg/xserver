@@ -82,13 +82,20 @@ present_execute_wait(present_vblank_ptr vblank, uint64_t crtc_msc)
     }
 
 #ifdef DRI3
-    /* Defer execution of explicitly synchronized copies.
-     * Flip synchronization is managed by the driver.
+    /* Defer execution of explicitly synchronized presents until the
+     * acquire point has signalled.
      */
-    if (!vblank->flip && vblank->acquire_syncobj &&
+    if (vblank->acquire_syncobj &&
         !vblank->acquire_syncobj->is_signaled(vblank->acquire_syncobj,
                                               vblank->acquire_point)) {
         vblank->efd = eventfd(0, EFD_CLOEXEC);
+        if (vblank->efd < 0) {
+            /* Check the acquire point again at the next MSC */
+            if (screen_priv->queue_vblank(screen, window, vblank->crtc,
+                                          vblank->event_id, crtc_msc + 1) == Success)
+                return TRUE;
+            return FALSE;
+        }
         SetNotifyFd(vblank->efd, present_syncobj_triggered, X_NOTIFY_READ, vblank);
         vblank->acquire_syncobj->signaled_eventfd(vblank->acquire_syncobj,
                                                   vblank->acquire_point,
@@ -127,8 +134,14 @@ present_execute_copy(present_vblank_ptr vblank, uint64_t crtc_msc)
 #ifdef DRI3
     if (vblank->release_syncobj) {
         int fence_fd = screen_priv->flush_fenced(window);
-        vblank->release_syncobj->import_fence(vblank->release_syncobj,
-                                              vblank->release_point, fence_fd);
+
+        /* -1 means the copy has already completed */
+        if (fence_fd >= 0)
+            vblank->release_syncobj->import_fence(vblank->release_syncobj,
+                                                  vblank->release_point, fence_fd);
+        else
+            vblank->release_syncobj->signal(vblank->release_syncobj,
+                                            vblank->release_point);
     } else
 #endif /* DRI3 */
     {

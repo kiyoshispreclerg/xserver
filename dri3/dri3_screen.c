@@ -283,8 +283,10 @@ int dri3_import_syncobj(ClientPtr client, ScreenPtr screen, XID id, int fd)
     const dri3_screen_info_rec *info = dri3_screen_priv(screen)->info;
     struct dri3_syncobj *syncobj = NULL;
 
-    if (info->version < 4 || !info->import_syncobj)
+    if (!info || info->version < 4 || !info->import_syncobj) {
+        close(fd);
         return BadImplementation;
+    }
 
     syncobj = info->import_syncobj(client, screen, id, fd);
     close(fd);
@@ -296,4 +298,20 @@ int dri3_import_syncobj(ClientPtr client, ScreenPtr screen, XID id, int fd)
         return BadAlloc;
 
     return Success;
+}
+
+/* Highest DRI3 minor version a screen's provider supports. */
+CARD32
+dri3_info_minor_version(const dri3_screen_info_rec *info)
+{
+    if (!info || info->version < 1 || !info->fd_from_pixmap)
+        return 0;
+    if (info->version < 2 || !info->pixmap_from_fds ||
+        !info->fds_from_pixmap || !info->get_formats ||
+        !info->get_modifiers || !info->get_drawable_modifiers)
+        return 1;
+    /* 1.3 only adds SetDRMDeviceInUse, which the server handles alone */
+    if (info->version < 4 || !info->import_syncobj)
+        return 3;
+    return 4;
 }

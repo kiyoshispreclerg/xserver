@@ -49,7 +49,7 @@ typedef struct dri3_screen_priv {
     CARD32                      num_formats;
     dri3_dmabuf_format_ptr      formats;
 
-    const dri3_screen_info_rec *info;
+    dri3_screen_info_rec       *info;
 } dri3_screen_priv_rec, *dri3_screen_priv_ptr;
 
 #define wrap(priv,real,mem,func) {\
@@ -116,6 +116,9 @@ dri3_import_syncobj(ClientPtr client, ScreenPtr screen, XID id, int fd);
 
 int
 dri3_send_open_reply(ClientPtr client, int fd);
+
+CARD32
+dri3_info_minor_version(const dri3_screen_info_rec *info);
 
 uint32_t
 drm_format_for_depth(uint32_t depth, uint32_t bpp);

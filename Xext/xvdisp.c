@@ -713,6 +713,9 @@ SingleXvPutImage(ClientPtr client)
     height = stuff->height;
     size = (*pPort->pAdaptor->ddQueryImageAttributes) (pPort, pImage, &width,
                                                        &height, NULL, NULL);
+    if (size < 0)
+        return BadValue;
+
     size += sizeof(xvPutImageReq);
     size = bytes_to_int32(size);
 
@@ -813,7 +816,8 @@ SingleXvShmPutImage(ClientPtr client)
     size_needed = (*pPort->pAdaptor->ddQueryImageAttributes) (pPort, pImage,
                                                               &width, &height,
                                                               NULL, NULL);
-    if ((size_needed + stuff->offset) > shmdesc->size)
+    if (size_needed < 0 || stuff->offset > shmdesc->size ||
+        (unsigned long) size_needed > shmdesc->size - stuff->offset)
         return BadAccess;
 
     if ((width < stuff->width) || (height < stuff->height))
@@ -941,6 +945,10 @@ ProcXvQueryImageAttributes(ClientPtr client)
     size = (*pPort->pAdaptor->ddQueryImageAttributes) (pPort, pImage,
                                                        &width, &height, offsets,
                                                        pitches);
+    if (size < 0) {
+        x_rpcbuf_clear(&rpcbuf);
+        return BadValue;
+    }
 
     xvQueryImageAttributesReply reply = {
         .num_planes = num_planes,

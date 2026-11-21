@@ -1,7 +1,8 @@
-version_split = meson.project_version().split('.')
-major = version_split[0].to_int()
-minor = version_split[1].to_int()
-patch = version_split[2].to_int()
+version_parts = meson.project_version().split('-') # split on prerelease
+version_numbers = version_parts[0].split('.')
+major = version_numbers[0].to_int()
+minor = version_numbers[1].to_int()
+patch = version_numbers[2].to_int()
 
 # convert to the old-style 1.x.y version scheme used up to 1.20.x for backwards compatibility
 release = 1 * 10000000 + major * 100000 + minor * 1000 + patch
@@ -98,6 +99,8 @@ conf_data.set('CONFIG_WSCONS', host_machine.system() in ['openbsd', 'netbsd'] ? 
 conf_data.set('HAVE_XSHMFENCE', xshmfence_dep.found() ? '1' : false)
 conf_data.set('WITH_LIBDRM', libdrm_required ? '1' : false)
 conf_data.set('LIBDRM_HAS_PLANE_SIZE_HINTS', libdrm_required ? libdrm_dep.version().version_compare('>= 2.4.122') : false)
+conf_data.set('LIBDRM_HAS_SYNCOBJ_EVENTFD',
+              libdrm_required and cc.has_function('drmSyncobjEventfd', dependencies: libdrm_dep) ? '1' : false)
 conf_data.set('GLAMOR_HAS_EGL', epoxy_dep.found() ? '1' : false)
 conf_data.set('GLAMOR_HAS_EGL_QUERY_DMABUF',
               epoxy_dep.found() and epoxy_dep.version().version_compare('>= 1.4.4') ? '1' : false)

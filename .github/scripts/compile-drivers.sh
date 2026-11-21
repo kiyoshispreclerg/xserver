@@ -22,9 +22,9 @@ build_xf86drv_ac    input-void              25.0.0
 build_xf86drv_ac    input-wacom             25.0.0
 
 build_xf86drv_ac    video-amdgpu            25.0.0
-build_xf86drv_ac    video-apm               25.0.0
+build_xf86drv_ac    video-apm               25.0.1
 build_xf86drv_ac    video-ark               25.0.0
-build_xf86drv_ac    video-ast               25.0.0
+build_xf86drv_ac    video-ast               25.0.1
 build_xf86drv_ac    video-ati               25.0.0
 build_xf86drv_ac    video-chips             25.0.0
 build_xf86drv_ac    video-cirrus            25.0.0
@@ -34,14 +34,14 @@ build_xf86drv_ac    video-freedreno         25.0.0
 build_xf86drv_ac    video-geode             25.0.0
 build_xf86drv_ac    video-i128              25.0.0
 build_xf86drv_ac    video-i740              25.0.0
-build_xf86drv_ac    video-intel             25.0.0
+build_xf86drv_ac    video-intel             25.0.3
 build_xf86drv_ac    video-mach64            25.0.0
 build_xf86drv_ac    video-mga               25.0.0
 build_xf86drv_ac    video-neomagic          25.0.0
 build_xf86drv_ac    video-nested            25.0.0
 build_xf86drv_ac    video-nouveau           25.0.0
 build_xf86drv_ac    video-nv                25.0.0
-build_xf86drv_ac    video-omap              25.0.0
+build_xf86drv_ac    video-omap              25.0.1
 build_xf86drv_ac    video-qxl               25.0.0
 build_xf86drv_ac    video-r128              25.0.0
 build_xf86drv_ac    video-rendition         25.0.0
@@ -63,4 +63,39 @@ build_xf86drv_ac    video-vmware            25.0.0
 build_xf86drv_ac    video-v4l               25.0.0
 build_xf86drv_ac    video-vbox              25.0.0
 build_xf86drv_ac    video-voodoo            25.0.0
-build_xf86drv_ac    video-xgi               25.0.0
+build_xf86drv_ac    video-xgi               25.0.2
+
+# every server symbol a module needs must be exported by this server;
+# libdrm and libxcvt are in $X11_PREFIX, outside the server's libdir
+abi_tools=$(pkg-config --variable=abi_tools_dir xorg-server)
+prefix=$(pkg-config --variable=prefix xorg-server)
+failed=
+# a GitHub annotation, shown at the top of the run and in its notification
+annotate() {
+    local msg=${1//'%'/%25}
+    echo "::error::${msg//$'\n'/%0A}"
+}
+for drv in xf86-*; do
+    modules=$(find "$drv" -path '*/.libs/*_drv.so')
+    if [ -z "$modules" ]; then
+        annotate "no *_drv.so built for $drv"
+        failed="$failed $drv"
+    fi
+    # the SBUS API they use is built into the server only on SPARC
+    case $drv in
+    xf86-video-sun*) continue ;;
+    esac
+    for mod in $modules; do
+        if ! out=$(LD_LIBRARY_PATH=$X11_PREFIX/lib/$MACHINE \
+                "$abi_tools/check-symbols.sh" --prefix "$prefix" "$mod" 2>&1); then
+            annotate "$out"
+            failed="$failed $mod"
+        else
+            echo "$out"
+        fi
+    done
+done
+if [ -n "$failed" ]; then
+    echo "symbol check failed:$failed" >&2
+    exit 1
+fi
