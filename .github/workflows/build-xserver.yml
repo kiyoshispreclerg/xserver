@@ -128,6 +128,7 @@ jobs:
             - drivers-prepare-ubuntu
         runs-on: ubuntu-latest
         strategy:
+            fail-fast: false
             matrix:
                 driver:
                     - input-elographics:25.0.0
@@ -141,9 +142,9 @@ jobs:
                     - input-void:25.0.0
                     - input-wacom:25.0.0
                     - video-amdgpu:25.0.0
-                    - video-apm:25.0.0
+                    - video-apm:25.0.1
                     - video-ark:25.0.0
-                    - video-ast:25.0.0
+                    - video-ast:25.0.1
                     - video-ati:25.0.0
                     - video-chips:25.0.0
                     - video-cirrus:25.0.0
@@ -153,14 +154,14 @@ jobs:
                     - video-geode:25.0.0
                     - video-i128:25.0.0
                     - video-i740:25.0.0
-                    - video-intel:25.0.1
+                    - video-intel:25.0.3
                     - video-mach64:25.0.0
                     - video-mga:25.0.0
                     - video-neomagic:25.0.0
                     - video-nested:25.0.0
                     - video-nouveau:25.0.0
                     - video-nv:25.0.0
-                    - video-omap:25.0.0
+                    - video-omap:25.0.1
                     - video-qxl:25.0.0
                     - video-r128:25.0.0
                     - video-rendition:25.0.0
@@ -182,7 +183,7 @@ jobs:
                     - video-v4l:25.0.1
                     - video-vbox:25.0.0
                     - video-voodoo:25.0.0
-                    - video-xgi:25.0.0
+                    - video-xgi:25.0.2
         steps:
             - name: Check out repository code
               uses: actions/checkout@v4
@@ -368,7 +369,7 @@ jobs:
             - name: run in DragonFlyBSD VM (attempt 1)
               id: dfly-1
               continue-on-error: true
-              uses: vmactions/dragonflybsd-vm@v1.1.4
+              uses: vmactions/dragonflybsd-vm@v1.3.4
               with:
                   envs: 'MESON_ARGS'
                   usesh: true
@@ -380,7 +381,7 @@ jobs:
               id: dfly-2
               if: ${{ !cancelled() && steps.dfly-1.outcome == 'failure' }}
               continue-on-error: true
-              uses: vmactions/dragonflybsd-vm@v1.1.4
+              uses: vmactions/dragonflybsd-vm@v1.3.4
               with:
                   envs: 'MESON_ARGS'
                   usesh: true
@@ -391,7 +392,7 @@ jobs:
             - name: run in DragonFlyBSD VM (attempt 3)
               id: dfly-3
               if: ${{ !cancelled() && steps.dfly-1.outcome == 'failure' && steps.dfly-2.outcome == 'failure' }}
-              uses: vmactions/dragonflybsd-vm@v1.1.4
+              uses: vmactions/dragonflybsd-vm@v1.3.4
               with:
                   envs: 'MESON_ARGS'
                   usesh: true

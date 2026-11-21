@@ -20,3 +20,27 @@ echo "DRIVER_NAME=$DRIVER_NAME"
 echo "DRIVER_VER=$DRIVER_VER"
 
 build_xf86drv_ac "$DRIVER_NAME" "$DRIVER_VER"
+
+# every server symbol the module needs must be exported by this server
+# a GitHub annotation, shown at the top of the run and in its notification
+annotate() {
+    local msg=${1//'%'/%25}
+    echo "::error::${msg//$'\n'/%0A}"
+}
+abi_tools=$(pkg-config --variable=abi_tools_dir xorg-server)
+modules=$(find "xf86-$DRIVER_NAME" -path '*/.libs/*_drv.so')
+[ -n "$modules" ] || { annotate "no *_drv.so built for $DRIVER_NAME"; exit 1; }
+# the SBUS API they use is built into the server only on SPARC
+case $DRIVER_NAME in
+video-sun*) exit 0 ;;
+esac
+failed=
+for mod in $modules; do
+    if ! out=$("$abi_tools/check-symbols.sh" --prefix "$X11_PREFIX" "$mod" 2>&1); then
+        annotate "$out"
+        failed=1
+    else
+        echo "$out"
+    fi
+done
+[ -z "$failed" ] || exit 1

@@ -45,11 +45,13 @@ typedef struct glamor_egl_screen_private {
 #endif
 
     int has_image_dma_buf_export;
+    int has_native_fence_sync;
     int has_EXT_EGL_image_storage;
     int has_OES_EGL_image;
 
     int fd;
     int dmabuf_capable;
+    int syncobj_supported; /* -1 until probed */
 } glamor_egl_priv_t;
 
 /**
